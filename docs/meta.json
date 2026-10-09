@@ -1,0 +1,12 @@
+{
+  "title": "Contracts",
+  "icon": "FileLock",
+  "root": true,
+  "pages": [
+    "index",
+    "quickstart",
+    "guides",
+    "concepts",
+    "reference"
+  ]
+}

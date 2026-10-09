@@ -1,0 +1,10 @@
+# The Dockerfile copies exactly three paths, so the context is exactly those three. Without
+# this, every `make up --build` uploads node_modules (tens of megabytes of devDependencies the
+# image never installs) to the daemon and then discards it.
+#
+# Deny-all plus explicit exceptions, so a new top-level file cannot silently join the context.
+# Docker reads the Dockerfile itself outside the context, so excluding it here is harmless.
+*
+!package.json
+!package-lock.json
+!src

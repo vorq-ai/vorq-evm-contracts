@@ -1,0 +1,8 @@
+{
+  "title": "Guides",
+  "pages": [
+    "run-local-fork",
+    "read-state-with-cast",
+    "verify-eip712-signature"
+  ]
+}

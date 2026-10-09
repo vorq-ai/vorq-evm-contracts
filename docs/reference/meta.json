@@ -1,0 +1,10 @@
+{
+  "title": "Reference",
+  "pages": [
+    "job-registry",
+    "provider-registry",
+    "ask-registry",
+    "signing",
+    "deployments"
+  ]
+}

@@ -1,0 +1,124 @@
+# Pinned rather than derived from the directory name: later plans gate on this project's
+# `deploy` service, so the project name and the `vorq-fork_default` network it implies are
+# part of a cross-plan contract. `COMPOSE_PROJECT_NAME` and `-p` still outrank this by
+# Compose's own precedence, so they remain the documented way to run a second fork.
+name: vorq-fork
+
+# Every host path below hangs off VORQ_FORK_DIR, and it has no `:-` default on purpose.
+# Compose resolves relative paths against the PROJECT directory — the directory of the FIRST
+# `-f` file, not of the file that declares them — and reads `.env` from that same directory. So
+# when this file is the first `-f` (or the only one, which is what `make up` does), the `.env`
+# beside it sets VORQ_FORK_DIR=. and every path lands here. Put somebody else's compose file
+# first and that `.env` is never read: the `:?` on the /contracts mount then aborts the whole
+# file — one guard is enough, Compose refuses to produce a config when any required variable is
+# missing — instead of silently mounting the wrong repository and publishing addresses.json into
+# their tree. The escape hatch is the same variable: export it as an absolute path and any
+# ordering works.
+
+# Images are pinned to an immutable digest, not a moving tag (ruling R28): a stack whose whole
+# claim is byte-identical addresses on every boot cannot be built on `:latest`. The readable tag
+# is kept alongside the digest so the version is visible; the digest is what Docker resolves.
+# `ghcr.io/foundry-rs/foundry:latest` is a NIGHTLY stream, so it was not even the same release
+# line as the toolchain this repo is tested with.
+x-foundry-image: &foundry-image ghcr.io/foundry-rs/foundry:v1.7.1@sha256:8347b728d5d393dac1c018691b36f506d23b9dcd78341d40ea0fcb11c3a19cdd
+
+# The image's entrypoint is `/bin/sh -c`, and Compose word-splits a scalar `command:`,
+# so every command here is a one-element list: that keeps it a single shell string.
+services:
+  anvil:
+    image: *foundry-image
+    # A throwaway fork of Base Sepolia, taken near head at start (see below). 2 s blocks,
+    # like Base. Chain id stays 84532.
+    command:
+      - >-
+        FB=$${FORK_BLOCK:-};
+        if [ -z "$$FB" ]; then FB=$$(( $$(cast block-number --rpc-url ${BASE_SEPOLIA_RPC_URL:?set BASE_SEPOLIA_RPC_URL}) - 64 )); fi;
+        echo "anvil: forking Base Sepolia at block $$FB";
+        exec anvil --fork-url ${BASE_SEPOLIA_RPC_URL} --fork-block-number "$$FB" --no-mining --host 0.0.0.0 --timeout 120000 --retries 10
+    # `--no-mining`: mining starts from the bootstrap, at 2 s, once it has filled the
+    # EIP-2935 block-hash history slots locally. Every mined block writes one of them,
+    # anvil fetches its old value upstream first, and a failed fetch there panics
+    # anvil (`pre-execution changes failed`, 2026-09-30). `--timeout`/`--retries`
+    # sit above anvil's 45 s and 5 for the fetches that remain (accounts, code).
+    # The block is chosen at start, not pinned: head minus 64, so a non-archive
+    # upstream (the public endpoint) always holds the state, and nothing here goes
+    # stale as the chain moves on. A fixed pin survives as an override for
+    # reproducing a run — `FORK_BLOCK=<n>` in the environment. `test/utils/BaseFork.sol`
+    # keeps its own constant on purpose: Foundry's RPC cache is keyed by block, and
+    # the unit suites are offline after the first run only because that number
+    # never moves.
+    environment:
+      FORK_BLOCK: ${FORK_BLOCK:-}
+    # Anvil scratches into ~/.foundry/anvil. With nothing mounted there it lands in the
+    # container's WRITABLE LAYER, which `stop`/`start` preserves and only `down` discards — so
+    # on a stack that is brought up once and left running for weeks it grows without bound,
+    # and invisibly: `docker system df` attributes it to no image and the Volumes list never
+    # shows it. It reached 134 GB here, which was most of what the OrbStack disk image had
+    # grown to. tmpfs keeps it off that image and caps it. Nothing in the directory is load-
+    # bearing: no --state/--load-state is passed, so every cold start is the pinned fork block
+    # regardless.
+    tmpfs:
+      - /home/foundry/.foundry/anvil:size=4g,mode=1777
+    ports:
+      # 8546 is uncapped, direct anvil access, and stays published for debugging.
+      - "8546:8545"
+    # A cold start fetches the fork block's state over the public Base Sepolia RPC before it
+    # answers anything, which takes minutes rather than seconds — hence the long retry budget.
+    # It is a retry budget and not a sleep: a warm start still passes on the first probe.
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1"]
+      interval: 1s
+      timeout: 3s
+      retries: 300
+
+  # The canonical fork RPC: the same anvil, plus the two things every real endpoint has and a
+  # bare anvil does not — an eth_getLogs block-range cap, and no `anvil_*`/`evm_*`/`hardhat_*`
+  # namespaces. It is what keeps this chain chain-shaped: code that has to chunk its log queries
+  # here, and cannot reach for a cheatcode here, works unchanged on a real network. The `deploy`
+  # service below keeps talking to anvil directly — its `anvil_setCode` is precisely the kind of
+  # call this port refuses, and a bootstrap through the cap buys nothing and can only fail.
+  rpc-proxy:
+    build: ${VORQ_FORK_DIR}/proxy
+    depends_on:
+      anvil:
+        condition: service_healthy
+    ports:
+      - "8545:8545"
+    environment:
+      ANVIL_URL: http://anvil:8545
+      RANGE_CAP: "5000"
+    # Proves the proxy is accepting connections, which is all anything needs to gate on —
+    # the chain behind it has its own healthcheck. The image has no curl/wget, hence node.
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(8545,'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  deploy:
+    image: *foundry-image
+    depends_on:
+      anvil:
+        condition: service_healthy
+    # Remappings, lib/ and foundry.toml's ./out-addresses fs-permission all resolve
+    # against the forge project root, so the bootstrap's forge calls run from there.
+    working_dir: /contracts
+    # Anvil's public dev keys #0-#4 and this project's fixed role assignment: #0 deployer and
+    # relayer, #1 treasury, #2 curation, #3 provider operator, #4 client. Literals, not
+    # overridable variables — this is a throwaway fork and the addresses it publishes are only
+    # deterministic while these are.
+    environment:
+      RPC: http://anvil:8545
+      USDC: "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+      DEPLOYER_PK: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      TREASURY_PK: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+      CURATION_PK: "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+      PROVIDER_PK: "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6"
+      CLIENT_PK: "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a"
+    volumes:
+      - ${VORQ_FORK_DIR:?unset - fork/docker-compose.yml must be the FIRST -f file or COMPOSE_FILE entry, because Compose resolves this file's paths against the first file's directory and reads fork/.env from there. To compose it after another stack, export VORQ_FORK_DIR as the absolute path of vorq-evm-contracts/fork.}/..:/contracts
+      - ${VORQ_FORK_DIR}/state:/state
+    # The whole boot lives in fork/bootstrap.sh, which is also what meta-sdk/e2e runs. Its
+    # exit status is the only signal that means the chain is ready: it publishes /state last,
+    # so a bootstrap that simulated clean and then failed on chain leaves nothing behind.
+    command: ["sh /contracts/fork/bootstrap.sh"]

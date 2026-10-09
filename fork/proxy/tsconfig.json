@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "esnext",
+    // `bundler` resolution, because the source is run by node's type stripping rather than
+    // compiled: nothing emits, and the test imports `../src/proxy` without an extension.
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "esModuleInterop": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    // `node --experimental-strip-types` erases types, it does not compile them, so anything
+    // needing type-directed emit (enums, parameter properties, namespaces) must not appear.
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "test"]
+}

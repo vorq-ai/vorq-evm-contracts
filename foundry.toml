@@ -1,0 +1,33 @@
+[profile.default]
+optimizer = true
+optimizer_runs = 200
+evm_version = "cancun"
+fs_permissions = [
+    { access = "read-write", path = "./out-addresses" },
+    # test/Vectors.t.sol: reads the committed cross-language signing vectors to verify them, and
+    # rewrites them under VECTORS_WRITE=1.
+    { access = "read-write", path = "./vectors" },
+    # and re-reads the coordinator's container vectors, which C_A and C_B are transcribed from. A
+    # transcription nothing re-reads is a copy that goes stale in silence, and none of this file's
+    # other checks looks at `c`.
+    { access = "read", path = "../vorq-coordinator-node/test/vectors" },
+    # script/ops/*: the per-chain address book. Read-only on purpose - no run can add a
+    # book here for a later run to bind to, so everything in this directory has been through
+    # review.
+    { access = "read", path = "./deployments" },
+]
+
+[lint]
+# block-timestamp: timestamp deadlines are protocol design (MAX_EXPIRY, FAIL_GRACE, the
+# +-600s job-op window, the +3600s registry skew ceiling), not an oversight.
+# unsafe-typecast: int->uint conversions cannot be written without a cast, so the lint
+# cannot be satisfied in code; each narrowing cast is range-proved by a comment instead.
+exclude_lints = ["block-timestamp", "unsafe-typecast"]
+
+[rpc_endpoints]
+base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+base = "${BASE_RPC_URL}"
+
+[etherscan]
+base_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 84532 }
+base = { key = "${ETHERSCAN_API_KEY}", chain = 8453 }

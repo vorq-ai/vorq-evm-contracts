@@ -1,0 +1,10 @@
+{
+  "chainId": 84532,
+  "dev": true,
+  "providerRegistry": "0xE09698C32e73F86D8227cDB3588fc219d8ce0471",
+  "jobRegistry": "0x5AAe62B7f27ad375610f8B559359De7c2136b760",
+  "askRegistry": "0xBA8eC092e701E4F60536d19443F12E441403743D",
+  "providerRegistryDomainSeparator": "0xac35c81fd56bff5756ebf7acc8c948e5ba89c7162f2c337cec9eaf867d73804c",
+  "jobRegistryDomainSeparator": "0x0647d233e20351bf2753df373c2d6494bb06e823421b456a596675de3e3a3426",
+  "askRegistryDomainSeparator": "0xa60aa36b1536a07c36bb601e3766d27a2d5f1d8457559964646af54eb2b9d946"
+}

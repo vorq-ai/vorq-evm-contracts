@@ -1,0 +1,35 @@
+# Compiler files
+cache/
+out/
+
+# Commonly ignored directories
+.logs/
+.ignore/
+
+# Ignores development broadcast logs
+!/broadcast
+/broadcast/*/31337/
+/broadcast/*/84532/
+/broadcast/**/dry-run/
+
+# Dotenv file
+.env
+.env.*
+!.env.example
+# fork/.env is not a dotenv secret: it is the one file that tells Compose this directory is
+# the project directory, and the fork's paths resolve wrongly without it. It must be cloned.
+!fork/.env
+
+# Deploy output (directory is committed so vm.writeJson has a parent to write into)
+out-addresses/*.json
+!out-addresses/.gitkeep
+
+# vectors/signing-v3.json is deliberately TRACKED: it is the master copy the three consumer repos
+# are checked against, and `forge test` verifies it on every run. Regenerate with
+# `VECTORS_WRITE=1 forge test --mt test_WriteVectors`, never by hand.
+
+# fork bootstrap output — addresses and ABIs are rewritten by every fresh stack, never committed
+fork/state/*.json
+fork/state/abi/
+node_modules/
+vectors/.regenerated.json
