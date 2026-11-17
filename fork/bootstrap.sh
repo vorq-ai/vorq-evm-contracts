@@ -84,7 +84,12 @@ cast rpc anvil_mine 0x1 --rpc-url "$RPC" >/dev/null
 
 # Explicit, because forge's own fork of anvil (the script's simulation) does not read
 # ETH_RPC_TIMEOUT: it gave up after 45 s on a predeploy's storage on 2026-09-30.
-forge script script/Deploy.s.sol --rpc-url "$RPC" --broadcast --no-storage-caching \
+CURATION=$(addr "$CURATION_PK") TREASURY=$(addr "$TREASURY_PK") \
+  forge script script/Deploy.s.sol --rpc-url "$RPC" --broadcast --no-storage-caching \
+  --rpc-timeout 600 --fork-retries 10
+# Curation's first transactions, from its key — a dev stack only; a real network sends them from
+# its Safe. Reads the registries back from the book Deploy.s.sol just wrote.
+forge script script/DevSeed.s.sol --rpc-url "$RPC" --broadcast --no-storage-caching \
   --rpc-timeout 600 --fork-retries 10
 
 # Fund the client the way the issuer would: the master minter grants the deployer an allowance,

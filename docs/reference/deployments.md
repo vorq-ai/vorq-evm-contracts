@@ -3,28 +3,28 @@ title: Deployments
 description: Networks, chain ids, contract addresses and EIP-712 domain separators of the VORQ contracts, and the address file formats.
 ---
 
-The contracts are deployed on **Base Sepolia** (testnet) only.
+The contracts are deployed on **Base** mainnet.
 
-## Base Sepolia
+## Base
 
-Chain id **84532**. Address book: [`deployments/base-sepolia.json`](https://github.com/vorq-ai/vorq-evm-contracts/blob/main/deployments/base-sepolia.json).
+Chain id **8453**. Address book: [`deployments/base.json`](https://github.com/vorq-ai/vorq-evm-contracts/blob/main/deployments/base.json). Deploy block: <!-- MAINNET-ADDRESS: deployBlock -->.
 
 | Contract | Address |
 | --- | --- |
-| `ProviderRegistry` | `0xE09698C32e73F86D8227cDB3588fc219d8ce0471` |
-| `JobRegistry` | `0x5AAe62B7f27ad375610f8B559359De7c2136b760` |
-| `AskRegistry` | `0xBA8eC092e701E4F60536d19443F12E441403743D` |
-| Payment token (USDC) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+| `ProviderRegistry` | <!-- MAINNET-ADDRESS: providerRegistry --> |
+| `JobRegistry` | <!-- MAINNET-ADDRESS: jobRegistry --> |
+| `AskRegistry` | <!-- MAINNET-ADDRESS: askRegistry --> |
+| Payment token (USDC) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
 
-USDC on Base Sepolia: EIP-712 `name` `USDC`, `version` `2`, 6 decimals.
+USDC on Base: EIP-712 `name` `USD Coin`, `version` `2`, 6 decimals.
 
 ### Domain separators
 
 | Contract (`name`, `version`) | `DOMAIN_SEPARATOR` |
 | --- | --- |
-| `ProviderRegistry` (`VORQ Providers`, `2`) | `0xac35c81fd56bff5756ebf7acc8c948e5ba89c7162f2c337cec9eaf867d73804c` |
-| `JobRegistry` (`VORQ Jobs`, `2`) | `0x0647d233e20351bf2753df373c2d6494bb06e823421b456a596675de3e3a3426` |
-| `AskRegistry` (`VORQ Asks`, `2`) | `0xa60aa36b1536a07c36bb601e3766d27a2d5f1d8457559964646af54eb2b9d946` |
+| `ProviderRegistry` (`VORQ Providers`, `2`) | <!-- MAINNET-ADDRESS: providerRegistryDomainSeparator --> |
+| `JobRegistry` (`VORQ Jobs`, `2`) | <!-- MAINNET-ADDRESS: jobRegistryDomainSeparator --> |
+| `AskRegistry` (`VORQ Asks`, `2`) | <!-- MAINNET-ADDRESS: askRegistryDomainSeparator --> |
 
 A separator rebuilt from `eip712Domain()` that differs from these means a different deployment.
 

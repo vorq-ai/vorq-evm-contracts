@@ -26,10 +26,10 @@ abstract contract OpsBase is Script {
     uint256 internal curationPk;
     bool internal dev;
 
-    /// @dev One reviewed book per real network, named by network. A fork of a network shares its
-    /// chain id but not its addresses; the separator check in `_loadFrom` is what refuses it.
+    /// @dev One reviewed book per real network, named by network; Base mainnet is the only one. A
+    /// fork of a network shares its chain id but not its addresses; the separator check in
+    /// `_loadFrom` is what refuses it.
     function _bookPath() internal view returns (string memory) {
-        if (block.chainid == 84532) return "deployments/base-sepolia.json";
         if (block.chainid == 8453) return "deployments/base.json";
         revert("ops: no address book for this chain");
     }
@@ -110,8 +110,18 @@ abstract contract OpsBase is Script {
             (bool okSim, bytes memory retSim) = target.call(data);
             _bubble(okSim, retSim);
             console2.log("  simulated OK as curation", curationAddr);
-            console2.log("  MODE: Safe. This script broadcast nothing.");
-            console2.log("  Paste `to` and `data` above into the Safe Transaction Builder.");
+            console2.log("  MODE: Safe. This script broadcast nothing. Sign it as a Safe owner:");
+            console2.log(
+                string.concat(
+                    "  safe-cli send-custom ",
+                    vm.toString(curationAddr),
+                    " \"$BASE_RPC_URL\" ",
+                    vm.toString(target),
+                    " 0 ",
+                    vm.toString(data),
+                    " --private-key \"$CURATION_OWNER_PK\" --non-interactive"
+                )
+            );
             return;
         }
 

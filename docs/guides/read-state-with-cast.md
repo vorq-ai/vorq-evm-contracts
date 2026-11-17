@@ -3,13 +3,13 @@ title: Read contract state with cast
 description: Read jobs, providers, quotes and configuration, query logs, and decode revert reasons with cast.
 ---
 
-The examples use the Base Sepolia deployment. For the [local fork](./run-local-fork.md), use `http://localhost:8545` and the addresses from `fork/state/addresses.json`.
+The examples use the Base deployment. For the [local fork](./run-local-fork.md), use `http://localhost:8545` and the addresses from `fork/state/addresses.json`.
 
 ```bash
-export RPC=https://sepolia.base.org
-export JOBS=0x5AAe62B7f27ad375610f8B559359De7c2136b760
-export PROVIDERS=0xE09698C32e73F86D8227cDB3588fc219d8ce0471
-export ASKS=0xBA8eC092e701E4F60536d19443F12E441403743D
+export RPC=https://mainnet.base.org
+export JOBS=<!-- MAINNET-ADDRESS: jobRegistry -->
+export PROVIDERS=<!-- MAINNET-ADDRESS: providerRegistry -->
+export ASKS=<!-- MAINNET-ADDRESS: askRegistry -->
 ```
 
 ## Read a job
@@ -106,7 +106,7 @@ cast logs --address $JOBS \
   $JOB --from-block <start> --to-block <end> --rpc-url $RPC
 ```
 
-Public endpoints cap the block range of `eth_getLogs` (`https://sepolia.base.org` allows 1,000 blocks; the local fork proxy allows 5,000). Query in chunks.
+Public RPCs cap the block range of `eth_getLogs` (the local fork proxy allows 5,000 blocks); use a provider RPC for wide scans and query in chunks.
 
 ## Decode a revert or a skipped line
 

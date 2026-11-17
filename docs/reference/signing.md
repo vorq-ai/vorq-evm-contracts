@@ -125,7 +125,7 @@ Typehash: `0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8`.
 - `validBefore` is `expiresAt + 1` because the token requires `block.timestamp < validBefore` while `claim` accepts `block.timestamp == expiresAt`.
 - `nonce = jobId` makes the authorization single-use and bound to one job. The nonce does not include the registry address.
 - A stored authorization cannot be replaced.
-- Read the token's `name` and `version` on chain. For Base Sepolia USDC they are `USDC` and `2`.
+- Read the token's `name` and `version` on chain. For USDC on Base they are `USD Coin` and `2`.
 
 ## Test vectors
 

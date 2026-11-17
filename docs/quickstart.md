@@ -1,9 +1,9 @@
 ---
 title: Quickstart
-description: Clone, build and test the contracts, then read the live Base Sepolia deployment with cast.
+description: Clone, build and test the contracts, then read the live Base deployment with cast.
 ---
 
-You need [Foundry](https://getfoundry.sh) (`forge` and `cast`) and network access to a Base Sepolia RPC. The public `https://sepolia.base.org` works.
+You need [Foundry](https://getfoundry.sh) (`forge` and `cast`) and network access to a Base Sepolia RPC for the tests and a Base RPC for the live deployment. The public `https://sepolia.base.org` and `https://mainnet.base.org` work.
 
 ## 1. Clone and build
 
@@ -28,16 +28,16 @@ forge test --no-match-test test_TheContainerLinkIsCurrent
 
 ## 3. Read the live deployment
 
-Set the Base Sepolia addresses from [Deployments](./reference/deployments.md):
+Set the Base addresses from [Deployments](./reference/deployments.md):
 
 ```bash
-export RPC=https://sepolia.base.org
-export JOBS=0x5AAe62B7f27ad375610f8B559359De7c2136b760
-export PROVIDERS=0xE09698C32e73F86D8227cDB3588fc219d8ce0471
-export ASKS=0xBA8eC092e701E4F60536d19443F12E441403743D
+export RPC=https://mainnet.base.org
+export JOBS=<!-- MAINNET-ADDRESS: jobRegistry -->
+export PROVIDERS=<!-- MAINNET-ADDRESS: providerRegistry -->
+export ASKS=<!-- MAINNET-ADDRESS: askRegistry -->
 ```
 
-Confirm you are talking to the right contract. The EIP-712 domain should read `VORQ Jobs`, version `2`, chain id `84532`, and the `JobRegistry` address:
+Confirm you are talking to the right contract. The EIP-712 domain should read `VORQ Jobs`, version `2`, chain id `8453`, and the `JobRegistry` address:
 
 ```bash
 cast call $JOBS "eip712Domain()(bytes1,string,string,uint256,address,bytes32,uint256[])" --rpc-url $RPC

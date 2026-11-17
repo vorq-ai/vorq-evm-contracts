@@ -32,7 +32,7 @@ A local Base Sepolia fork with the contracts deployed is in [`fork/`](fork/READM
 
 ## Deployments
 
-Base Sepolia (chain id 84532): [`deployments/base-sepolia.json`](deployments/base-sepolia.json). See [Deployments](docs/reference/deployments.md) for addresses and domain separators.
+Base (chain id 8453): [`deployments/base.json`](deployments/base.json). See [Deployments](docs/reference/deployments.md) for addresses and domain separators.
 
 ## Documentation
 

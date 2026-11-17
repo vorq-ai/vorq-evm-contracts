@@ -8,7 +8,7 @@ Include the affected contract and function, the impact, and steps or a test that
 
 ## Scope and status
 
-In scope: the contracts in [`src/`](src/) as deployed on the networks listed in [`deployments/`](deployments/). The contracts are deployed on Base Sepolia (testnet) only.
+In scope: the contracts in [`src/`](src/) as deployed on the networks listed in [`deployments/`](deployments/). The contracts are deployed on Base mainnet (chain id 8453).
 
 The contracts have **not** been externally audited. An internal manual review has been done; its open findings are listed below.
 

@@ -91,8 +91,6 @@ contract OpsBaseTest is OpsFixture {
     /// @dev One reviewed book per real network, named by network, so there is nothing to select
     /// between and no environment variable pointing at a file.
     function test_theBookIsNamedByNetwork() public {
-        vm.chainId(84532);
-        assertEq(probe.bookPath(), "deployments/base-sepolia.json");
         vm.chainId(8453);
         assertEq(probe.bookPath(), "deployments/base.json");
     }
@@ -101,6 +99,9 @@ contract OpsBaseTest is OpsFixture {
     /// must not silently bind to a neighbouring network's book.
     function test_aChainWithNoBookIsRefused() public {
         vm.chainId(31337);
+        vm.expectRevert(bytes("ops: no address book for this chain"));
+        probe.bookPath();
+        vm.chainId(84532); // the retired testnet stand has no book any more
         vm.expectRevert(bytes("ops: no address book for this chain"));
         probe.bookPath();
     }
