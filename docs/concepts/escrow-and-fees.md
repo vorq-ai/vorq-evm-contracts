@@ -11,15 +11,18 @@ An order carries `rateIn` and `rateOut` (`uint128`) and `unitsIn` and `unitsOut`
 
 ```
 cap    = max(1, ceilDiv(rateIn·unitsIn + rateOut·unitsOut, RATE_SCALE))
+p      = min(promptTok, unitsIn)
+k      = min(cachedTok, p)
+r      = min(rateInCached, rateIn)
 tok    = min(completionTok, unitsOut)
-charge = min(cap, max(1, ceilDiv(rateIn·unitsIn + rateOut·tok, RATE_SCALE)))
+charge = min(cap, max(1, ceilDiv(rateIn·(p−k) + r·k + rateOut·tok, RATE_SCALE)))
 feeCap = floor(cap · feeBps / 10000)
 fee    = floor(charge · feeBps / 10000)          // fee <= feeCap
 ```
 
 - `cap` is computed at `claim`. A `cap` that does not fit `uint128` reverts `CapOverflow`. A zero-priced order still escrows 1 atomic unit.
-- `unitsOut` is a ceiling: the provider reports `completionTok` at settlement and is paid for at most `unitsOut`. The stored `completionTok` is the clamped `tok`.
-- `unitsIn` is charged in full.
+- `unitsIn` and `unitsOut` are ceilings. At settlement the provider reports the backend's own counts: `promptTok`, the `cachedTok` part of it, and `completionTok`. It is paid for at most `unitsIn` and `unitsOut`. The stored counts are the clamped values.
+- `cachedTok` is charged at the provider's `rateInCached`, which can never exceed the order's `rateIn`.
 
 ## The escrow
 

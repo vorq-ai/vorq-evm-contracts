@@ -2,7 +2,7 @@
 pragma solidity 0.8.30;
 
 import {Vm} from "forge-std/Vm.sol";
-import {Order} from "../../src/Types.sol";
+import {Order, Usage} from "../../src/Types.sol";
 
 /// @notice The EIP-712 type tables and message renderers the signing vectors publish.
 ///
@@ -74,8 +74,9 @@ library VecJson {
         return string.concat(
             "{",
             D_FULL,
-            ',"Settle":[{"name":"jobId","type":"bytes32"},{"name":"completionTok","type":"uint32"},',
-            '{"name":"issuedAt","type":"uint64"}]}'
+            ',"Settle":[{"name":"jobId","type":"bytes32"},{"name":"promptTok","type":"uint32"},',
+            '{"name":"cachedTok","type":"uint32"},{"name":"completionTok","type":"uint32"},',
+            '{"name":"rateInCached","type":"uint128"},{"name":"issuedAt","type":"uint64"}]}'
         );
     }
 
@@ -268,11 +269,12 @@ library VecJson {
         return string.concat('{"jobId":', h(jobId), ',"issuedAt":', n(issuedAt), "}");
     }
 
-    function settleMessage(bytes32 jobId, uint32 completionTok, uint64 issuedAt) internal pure returns (string memory) {
-        return
-            string.concat(
-                '{"jobId":', h(jobId), ',"completionTok":', n(completionTok), ',"issuedAt":', n(issuedAt), "}"
-            );
+    function settleMessage(bytes32 jobId, Usage memory u, uint64 issuedAt) internal pure returns (string memory) {
+        return string.concat(
+            string.concat('{"jobId":', h(jobId), ',"promptTok":', n(u.promptTok), ',"cachedTok":', n(u.cachedTok)),
+            string.concat(',"completionTok":', n(u.completionTok), ',"rateInCached":', s(u.rateInCached)),
+            string.concat(',"issuedAt":', n(issuedAt), "}")
+        );
     }
 
     function identityMessage(bytes32 boxKey, bytes memory evidence, uint64 issuedAt)

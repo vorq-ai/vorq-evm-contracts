@@ -42,7 +42,8 @@ contract Eip712Test is Test {
     string internal constant ORDER =
         "Order(bytes32 c,uint32 modelId,uint32 slaSecs,uint128 rateIn,uint128 rateOut,uint32 unitsIn,uint32 unitsOut,uint32 designated,uint64 expiresAt)";
     string internal constant CLAIM = "Claim(bytes32 jobId,uint64 issuedAt)";
-    string internal constant SETTLE = "Settle(bytes32 jobId,uint32 completionTok,uint64 issuedAt)";
+    string internal constant SETTLE =
+        "Settle(bytes32 jobId,uint32 promptTok,uint32 cachedTok,uint32 completionTok,uint128 rateInCached,uint64 issuedAt)";
     string internal constant FAIL = "Fail(bytes32 jobId,uint64 issuedAt)";
     string internal constant CANCEL = "Cancel(bytes32 jobId,uint64 issuedAt)";
     string internal constant REQUEST_CAPACITY = "RequestCapacity(uint32 n,uint64 issuedAt)";

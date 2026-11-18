@@ -230,8 +230,15 @@ abstract contract JobHarness is BaseFork {
     /// but it is NOT part of what `pk` signs, so this helper passes it only to `submitAndSettle`.
     function _settle(uint256 pk, bytes32 jobId, uint32 completionTok, bytes memory resultCid) internal {
         uint64 t = uint64(block.timestamp);
-        bytes memory sig = OpSig.signSettle(vm, pk, jr, jobId, completionTok, t);
-        jr.submitAndSettle(jobId, completionTok, resultCid, t, sig);
+        _settleUsage(pk, jobId, OpSig.usage(completionTok), resultCid);
+    }
+
+    /// @notice `_settle` with the backend's full usage: prompt, cached and completion counts and the
+    /// provider's cached rate.
+    function _settleUsage(uint256 pk, bytes32 jobId, Usage memory u, bytes memory resultCid) internal {
+        uint64 t = uint64(block.timestamp);
+        bytes memory sig = OpSig.signSettle(vm, pk, jr, jobId, u, t);
+        jr.submitAndSettle(jobId, u, resultCid, t, sig);
     }
 
     /// @notice R1 companion to `_settle`, same contract as `_claimSig`: pre-sign on the line
@@ -239,7 +246,7 @@ abstract contract JobHarness is BaseFork {
     /// Takes no `resultCid` — the Settle struct has none, so the signature a negative test pre-signs
     /// is valid for whatever CID the call then submits.
     function _settleSig(uint256 pk, bytes32 jobId, uint32 completionTok) internal view returns (bytes memory) {
-        return OpSig.signSettle(vm, pk, jr, jobId, completionTok, uint64(block.timestamp));
+        return OpSig.signSettle(vm, pk, jr, jobId, OpSig.usage(completionTok), uint64(block.timestamp));
     }
 
     /// @notice Operator-signed provider abort at the current block time, submitted by the TEST

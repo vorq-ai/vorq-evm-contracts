@@ -70,7 +70,15 @@ contract JobRegistry {
         bytes taskCid
     );
     event Claimed(bytes32 indexed jobId, uint32 indexed provider, uint64 claimedAt);
-    event Settled(bytes32 indexed jobId, uint32 completionTok, uint128 fee, bytes resultCid);
+    event Settled(
+        bytes32 indexed jobId,
+        uint32 promptTok,
+        uint32 cachedTok,
+        uint32 completionTok,
+        uint128 rateInCached,
+        uint128 fee,
+        bytes resultCid
+    );
     event Ended(bytes32 indexed jobId, uint8 cause); // 2 cancelled | 3 provider_fail | 4 reclaim only
     event FeesChanged(uint16 feeBps, uint128 gasFee);
     event SlaAllowedChanged(uint32 secs, bool allowed);
@@ -93,8 +101,11 @@ contract JobRegistry {
     // resultCid is NOT signed, for the same reason taskCid is not: the provider hands the result to
     // the coordinator, which pins it and learns the name from the storage service. Unlike the order
     // path there is no commitment standing behind it — the settle path has no `c` — which is an
-    // accepted consequence: the CID is recorded, never attested.
-    bytes32 public constant SETTLE_TYPEHASH = keccak256("Settle(bytes32 jobId,uint32 completionTok,uint64 issuedAt)");
+    // accepted consequence: the CID is recorded, never attested. The four usage members are the
+    // backend's own counts and the provider's cached rate; the order's units and rateIn cap them.
+    bytes32 public constant SETTLE_TYPEHASH = keccak256(
+        "Settle(bytes32 jobId,uint32 promptTok,uint32 cachedTok,uint32 completionTok,uint128 rateInCached,uint64 issuedAt)"
+    );
     bytes32 public constant FAIL_TYPEHASH = keccak256("Fail(bytes32 jobId,uint64 issuedAt)");
     bytes32 public constant CANCEL_TYPEHASH = keccak256("Cancel(bytes32 jobId,uint64 issuedAt)");
 
@@ -109,6 +120,8 @@ contract JobRegistry {
         uint32 unitsIn;
         uint32 unitsOut;
         uint32 completionTok;
+        uint32 promptTok;
+        uint32 cachedTok;
         uint32 providerId;
         uint64 expiresAt;
         uint64 claimedAt;
@@ -116,6 +129,7 @@ contract JobRegistry {
         uint8 endedBecause;
         uint128 cap;
         uint128 gasFeeSnap; // gasFee as of post — the escrow amount cannot move under the client
+        uint128 rateInCached; // written at settle, <= rateIn
         bytes taskCid;
         bytes resultCid;
         bytes authSig; // parked at post, consumed and deleted by claim
@@ -349,7 +363,7 @@ contract JobRegistry {
 
     function submitAndSettle(
         bytes32 jobId,
-        uint32 completionTok,
+        Usage calldata usage,
         bytes calldata resultCid,
         uint64 issuedAt,
         bytes calldata sig
@@ -361,12 +375,12 @@ contract JobRegistry {
         // A replay is dead by the same gate: the terminal row persists forever.
         if (j.state != uint8(JobState.Claimed)) revert NotClaimed();
         // NEVER msg.sender: the op signature is the whole authority, so a relayer can land this.
-        // The signature binds jobId + completionTok, which is what lets a relayer submit without
+        // The signature binds jobId + the usage, which is what lets a relayer submit without
         // being able to edit what it settles. resultCid is deliberately OUTSIDE the signature — the
         // coordinator pins the result and the storage service mints the name, so the provider
         // cannot know the CID when it signs; the relayer fills it in and it is recorded, not
         // attested. Nothing else on this path may start depending on it being signed.
-        address signer = _recoverSettle(jobId, completionTok, issuedAt, sig);
+        address signer = _recoverSettle(jobId, usage, issuedAt, sig);
         // a zero recovered signer never authorizes: _recover answers address(0) for a malformed
         // signature, so reject it before it is compared to anything
         if (signer == address(0)) revert NotTheClaimant();
@@ -383,18 +397,13 @@ contract JobRegistry {
         _freshJobOp(issuedAt);
         if (resultCid.length == 0) revert EmptyResultCid();
 
-        // the count is clamped BEFORE it is stored, emitted, or priced — so the row's own
-        // rateIn*unitsIn + rateOut*completionTok is always the charge that was actually paid
-        uint32 tok = completionTok > j.unitsOut ? j.unitsOut : completionTok;
-        uint128 metered = _atomicCharge(j.rateIn, j.unitsIn, j.rateOut, tok);
-        // widened to uint256 deliberately: `charge * feeBps` would overflow a uint128 for a large
-        // charge, and the widening itself is lossless. This is the global-constraints charge
-        // formula spelled out; the clamp above already makes metered <= cap (both legs price the
-        // same immutable row and tok <= unitsOut), so the min never bites — it is what makes
-        // `cap - charge` provably non-negative without relying on that argument.
+        // the counts are clamped BEFORE they are stored, emitted, or priced — so the row's own
+        // rateIn*(promptTok-cachedTok) + rateInCached*cachedTok + rateOut*completionTok is always
+        // the charge that was actually paid. The min below never bites (every clamped leg prices
+        // at or under the cap's own leg); it makes `cap - charge` provably non-negative.
+        uint128 metered = _meter(j, usage);
         uint256 charge = metered > j.cap ? j.cap : metered;
 
-        j.completionTok = tok;
         j.resultCid = resultCid;
         j.state = uint8(JobState.Settled);
         j.endedBecause = ENDED_SETTLED; // cause 1 is view-only — settlement has its own event
@@ -412,7 +421,12 @@ contract JobRegistry {
         // token sees a Settled row and answers NotClaimed.
         uint256 fee = _distribute(j, provider, charge);
         // fee <= cap * 1000 / 10000 < 2**128, so the narrowing is lossless
-        emit Settled(jobId, tok, uint128(fee), resultCid);
+        _emitSettled(jobId, j, uint128(fee), resultCid);
+    }
+
+    // its own frame: seven event arguments on top of submitAndSettle's locals are "stack too deep"
+    function _emitSettled(bytes32 jobId, Job storage j, uint128 fee, bytes calldata resultCid) private {
+        emit Settled(jobId, j.promptTok, j.cachedTok, j.completionTok, j.rateInCached, fee, resultCid);
     }
 
     // what claim pulled for this row: the cap, the protocol fee's ceiling on top of it, and the
@@ -420,6 +434,21 @@ contract JobRegistry {
     // cap <= uint128 max and feeBps <= 1000, so the product is < 2**138, and the widening is lossless.
     function _locked(Job storage j) private view returns (uint256) {
         return uint256(j.cap) + uint256(j.cap) * feeBps / 10000 + j.gasFeeSnap;
+    }
+
+    // Clamps the backend's counts to the order and writes them to the row, then prices them:
+    // promptTok <= unitsIn, cachedTok <= promptTok, completionTok <= unitsOut, rateInCached <= rateIn.
+    // Its own frame for the same stack reason as _distribute.
+    function _meter(Job storage j, Usage calldata u) private returns (uint128) {
+        uint32 p = u.promptTok > j.unitsIn ? j.unitsIn : u.promptTok;
+        uint32 k = u.cachedTok > p ? p : u.cachedTok;
+        uint32 t = u.completionTok > j.unitsOut ? j.unitsOut : u.completionTok;
+        uint128 r = u.rateInCached > j.rateIn ? j.rateIn : u.rateInCached;
+        j.promptTok = p;
+        j.cachedTok = k;
+        j.completionTok = t;
+        j.rateInCached = r;
+        return _scaled(uint256(j.rateIn) * (p - k) + uint256(r) * k + uint256(j.rateOut) * t);
     }
 
     // a private frame for the payout legs: submitAndSettle's five parameters plus the metering
@@ -601,6 +630,9 @@ contract JobRegistry {
         v.unitsIn = j.unitsIn;
         v.unitsOut = j.unitsOut;
         v.completionTok = j.completionTok;
+        v.promptTok = j.promptTok;
+        v.cachedTok = j.cachedTok;
+        v.rateInCached = j.rateInCached;
         v.slaSecs = j.slaSecs;
         v.expiresAt = j.expiresAt;
         v.claimedAt = j.claimedAt;
@@ -626,11 +658,16 @@ contract JobRegistry {
         returns (uint128)
     {
         // A CALLER OBLIGATION, not an invariant this frame can enforce: both unit counts are
-        // `uint256` (so settlement can pass a clamped completionTok through the same arithmetic),
+        // `uint256` (the cap's two legs),
         // and callers MUST pass uint32-wide counts. Both do, straight off the row's uint32 fields,
         // which keeps raw <= 2*(2**128-1)*(2**32-1) < 2**161 and rules out uint256 overflow. A
         // future caller passing a wider count would have to re-argue this bound.
-        uint256 raw = uint256(rateIn) * unitsIn + uint256(rateOut) * unitsOut;
+        return _scaled(uint256(rateIn) * unitsIn + uint256(rateOut) * unitsOut);
+    }
+
+    // raw atomic-rate sum -> max(1, ceilDiv(raw, RATE_SCALE)), guarded to uint128. Every caller
+    // passes uint128 rates times uint32 counts (at most three legs), so raw < 2**163 never overflows.
+    function _scaled(uint256 raw) private pure returns (uint128) {
         uint256 c = (raw + RATE_SCALE - 1) / RATE_SCALE;
         if (c == 0) c = 1; // a zero-priced order still escrows the one-atomic-unit floor
         // the narrowing cast below is lossless only while c fits uint128, and c reaches ~2**141 at
@@ -654,12 +691,17 @@ contract JobRegistry {
     // Settle's struct hash, in its own frame for the same stack reason as _distribute. Every member
     // is a static type — resultCid is deliberately not one of them, so the digest this recovers is
     // independent of whatever CID the relayer submits alongside it.
-    function _recoverSettle(bytes32 jobId, uint32 completionTok, uint64 issuedAt, bytes calldata sig)
+    function _recoverSettle(bytes32 jobId, Usage calldata u, uint64 issuedAt, bytes calldata sig)
         private
         view
         returns (address)
     {
-        return _recover(keccak256(abi.encode(SETTLE_TYPEHASH, jobId, completionTok, issuedAt)), sig);
+        return _recover(
+            keccak256(
+                abi.encode(SETTLE_TYPEHASH, jobId, u.promptTok, u.cachedTok, u.completionTok, u.rateInCached, issuedAt)
+            ),
+            sig
+        );
     }
 
     function _recoverOrder(Order calldata o, bytes calldata sig) internal view returns (address) {

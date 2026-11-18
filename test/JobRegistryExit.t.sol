@@ -58,7 +58,7 @@ contract JobRegistryExitTest is JobHarness {
         vm.warp(deadline + 1);
         bytes memory lateSig = _settleSig(opPk, b, 100);
         vm.expectRevert(JobRegistry.SlaExpired.selector);
-        jr.submitAndSettle(b, 100, bytes("r"), uint64(block.timestamp), lateSig);
+        jr.submitAndSettle(b, OpSig.usage(100), bytes("r"), uint64(block.timestamp), lateSig);
         jr.reclaim(b);
         assertEq(jr.getJob(b).endedBecause, 4);
         assertEq(usdc.balanceOf(address(jr)), 0); // both locks resolved, nothing stranded
@@ -104,7 +104,7 @@ contract JobRegistryExitTest is JobHarness {
         jr.reclaim(jobId); // a second reclaim moves nothing
         bytes memory settleSig = _settleSig(opPk, jobId, 100);
         vm.expectRevert(JobRegistry.NotClaimed.selector);
-        jr.submitAndSettle(jobId, 100, bytes("r"), uint64(block.timestamp), settleSig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), uint64(block.timestamp), settleSig);
         bytes memory failSig = _failSig(opPk, jobId);
         vm.expectRevert(JobRegistry.NotClaimed.selector);
         jr.fail(jobId, uint64(block.timestamp), failSig);

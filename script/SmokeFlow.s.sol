@@ -96,11 +96,11 @@ contract SmokeFlow is Script {
         uint64 issuedAt = uint64(block.timestamp);
         bytes memory claimSig = OpSig.signClaim(vm, providerPk, jr, jobId, issuedAt);
         // RESULT_CID is submitted but not signed — it is not a member of the Settle struct
-        bytes memory settleSig = OpSig.signSettle(vm, providerPk, jr, jobId, COMPLETION_TOK, issuedAt);
+        bytes memory settleSig = OpSig.signSettle(vm, providerPk, jr, jobId, OpSig.usage(COMPLETION_TOK), issuedAt);
 
         vm.startBroadcast(vm.envUint("DEPLOYER_PK"));
         jr.claim(jobId, issuedAt, claimSig);
-        jr.submitAndSettle(jobId, COMPLETION_TOK, RESULT_CID, issuedAt, settleSig);
+        jr.submitAndSettle(jobId, OpSig.usage(COMPLETION_TOK), RESULT_CID, issuedAt, settleSig);
         vm.stopBroadcast();
     }
 }

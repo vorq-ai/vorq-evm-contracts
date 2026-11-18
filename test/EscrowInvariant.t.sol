@@ -56,7 +56,7 @@ contract EscrowInvariantTest is JobHarness {
         uint64 t = uint64(block.timestamp);
         bytes memory settleSig = _settleSig(opPk, jobId, 1);
         vm.expectRevert(JobRegistry.NotClaimed.selector);
-        jr.submitAndSettle(jobId, 1, bytes("r"), t, settleSig);
+        jr.submitAndSettle(jobId, OpSig.usage(1), bytes("r"), t, settleSig);
         bytes memory failSig = _failSig(opPk, jobId);
         vm.expectRevert(JobRegistry.NotClaimed.selector);
         jr.fail(jobId, t, failSig);
@@ -186,9 +186,9 @@ contract EscrowInvariantTest is JobHarness {
         bytes32 r = _claimOn(jr2, address(bad), keccak256("r25-reclaim"));
 
         uint64 t = uint64(block.timestamp);
-        bytes memory settleSig = OpSig.signSettle(vm, opPk, jr2, s, 100, t);
+        bytes memory settleSig = OpSig.signSettle(vm, opPk, jr2, s, OpSig.usage(100), t);
         vm.expectRevert(ProviderRegistry.NotJobRegistry.selector);
-        jr2.submitAndSettle(s, 100, bytes("r"), t, settleSig); // the +5 reward
+        jr2.submitAndSettle(s, OpSig.usage(100), bytes("r"), t, settleSig); // the +5 reward
 
         vm.warp(block.timestamp + 301); // past FAIL_GRACE, so the abort actually prices
         uint64 tFail = uint64(block.timestamp);
@@ -246,9 +246,9 @@ contract EscrowInvariantTest is JobHarness {
         assertEq(usdc.balanceOf(address(jr2)), 217); // claim funded it: no registry write on that path
 
         // settle never had a chance — the +5 reward is a registry write, grace or no grace
-        bytes memory settleSig = OpSig.signSettle(vm, opPk, jr2, stuck, 100, t0);
+        bytes memory settleSig = OpSig.signSettle(vm, opPk, jr2, stuck, OpSig.usage(100), t0);
         vm.expectRevert(ProviderRegistry.NotJobRegistry.selector);
-        jr2.submitAndSettle(stuck, 100, bytes("r"), t0, settleSig);
+        jr2.submitAndSettle(stuck, OpSig.usage(100), bytes("r"), t0, settleSig);
 
         vm.warp(t0 + 301); // past FAIL_GRACE, so the abort prices the miss and therefore writes
         uint64 tg = uint64(block.timestamp);

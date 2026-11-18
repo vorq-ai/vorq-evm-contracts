@@ -269,7 +269,12 @@ contract JobRegistryPostTest is Test {
             )
         );
         assertEq(jr.CLAIM_TYPEHASH(), keccak256("Claim(bytes32 jobId,uint64 issuedAt)"));
-        assertEq(jr.SETTLE_TYPEHASH(), keccak256("Settle(bytes32 jobId,uint32 completionTok,uint64 issuedAt)"));
+        assertEq(
+            jr.SETTLE_TYPEHASH(),
+            keccak256(
+                "Settle(bytes32 jobId,uint32 promptTok,uint32 cachedTok,uint32 completionTok,uint128 rateInCached,uint64 issuedAt)"
+            )
+        );
         assertEq(jr.FAIL_TYPEHASH(), keccak256("Fail(bytes32 jobId,uint64 issuedAt)"));
         assertEq(jr.CANCEL_TYPEHASH(), keccak256("Cancel(bytes32 jobId,uint64 issuedAt)"));
     }

@@ -44,12 +44,24 @@ struct JobView {
     uint32 unitsIn;
     uint32 unitsOut;
     uint32 completionTok;
+    uint32 promptTok;
+    uint32 cachedTok;
+    uint128 rateInCached;
     uint32 slaSecs;
     uint64 expiresAt;
     uint64 claimedAt;
     bytes taskCid;
     bytes resultCid;
     uint128 gasFee; // the job's gas fee snapshot, taken at post
+}
+
+// What a settle meters, as the provider's backend reported it. unitsIn and unitsOut on the order
+// are the ceilings; cachedTok is the part of promptTok billed at rateInCached (<= the order's rateIn).
+struct Usage {
+    uint32 promptTok;
+    uint32 cachedTok;
+    uint32 completionTok;
+    uint128 rateInCached;
 }
 
 struct Ask {

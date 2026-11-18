@@ -39,7 +39,7 @@ Members are encoded in declaration order. The strings below are byte-exact (no s
 ```
 Order(bytes32 c,uint32 modelId,uint32 slaSecs,uint128 rateIn,uint128 rateOut,uint32 unitsIn,uint32 unitsOut,uint32 designated,uint64 expiresAt)
 Claim(bytes32 jobId,uint64 issuedAt)
-Settle(bytes32 jobId,uint32 completionTok,uint64 issuedAt)
+Settle(bytes32 jobId,uint32 promptTok,uint32 cachedTok,uint32 completionTok,uint128 rateInCached,uint64 issuedAt)
 Fail(bytes32 jobId,uint64 issuedAt)
 Cancel(bytes32 jobId,uint64 issuedAt)
 ```
@@ -60,7 +60,7 @@ Cancel(bytes32 jobId,uint64 issuedAt)
 | `slaSecs` | `uint32` | Must be an allowed SLA at `post`. |
 | `rateIn` | `uint128` | Atomic units per input unit × `RATE_SCALE`. |
 | `rateOut` | `uint128` | Atomic units per output unit × `RATE_SCALE`. |
-| `unitsIn` | `uint32` | Input units, charged in full. |
+| `unitsIn` | `uint32` | Maximum input units. |
 | `unitsOut` | `uint32` | Maximum output units. |
 | `designated` | `uint32` | Provider id, or `0` for any provider. |
 | `expiresAt` | `uint64` | Unix seconds; at most `MAX_EXPIRY` (86,400 s) ahead at `post`. |

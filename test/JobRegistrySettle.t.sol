@@ -67,12 +67,12 @@ contract JobRegistrySettleTest is JobHarness {
         (bytes32 jobId,) = postJob(0);
         _claim(jobId);
         uint64 t = uint64(block.timestamp);
-        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, 100, t);
+        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, OpSig.usage(100), t);
         // altering the count under a valid signature still fails recovery
         vm.expectRevert(JobRegistry.NotTheClaimant.selector);
-        jr.submitAndSettle(jobId, 200, bytes("bafy-real"), t, sig);
+        jr.submitAndSettle(jobId, OpSig.usage(200), bytes("bafy-real"), t, sig);
         // ... but a CID the signer never saw is accepted, and is the one that gets recorded
-        jr.submitAndSettle(jobId, 100, bytes("bafy-relayer-chose-this"), t, sig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("bafy-relayer-chose-this"), t, sig);
         // metered: ceil((30000*1000 + 90000*100)/1e6) = 39 ; fee = 39*250/10000 = 0
         assertEq(usdc.balanceOf(op), 39);
         assertEq(jr.getJob(jobId).completionTok, 100);
@@ -86,17 +86,17 @@ contract JobRegistrySettleTest is JobHarness {
         (bytes32 jobId,) = postJob(0);
         _claim(jobId);
         uint64 t = uint64(block.timestamp);
-        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, 100, t);
+        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, OpSig.usage(100), t);
         uint256 snap = vm.snapshotState();
 
-        jr.submitAndSettle(jobId, 100, bytes("bafy-first"), t, sig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("bafy-first"), t, sig);
         assertEq(jr.getJob(jobId).state, 2);
         assertEq(jr.getJob(jobId).resultCid, bytes("bafy-first"));
         uint256 paid = usdc.balanceOf(op);
 
         assertTrue(vm.revertToState(snap));
         assertEq(jr.getJob(jobId).state, 1); // Claimed again, and the SAME `sig` bytes are reused
-        jr.submitAndSettle(jobId, 100, bytes("bafy-second-entirely-different"), t, sig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("bafy-second-entirely-different"), t, sig);
         assertEq(jr.getJob(jobId).state, 2);
         assertEq(jr.getJob(jobId).resultCid, bytes("bafy-second-entirely-different"));
         assertEq(usdc.balanceOf(op), paid); // and the CID moves no money either way
@@ -112,7 +112,7 @@ contract JobRegistrySettleTest is JobHarness {
         reg.setOperator(pid, op2);
         bytes memory oldSig = _settleSig(opPk, jobId, 100);
         vm.expectRevert(JobRegistry.NotTheClaimant.selector); // old key no longer resolves
-        jr.submitAndSettle(jobId, 100, bytes("r"), uint64(block.timestamp), oldSig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), uint64(block.timestamp), oldSig);
         _settle(op2Pk, jobId, 100, bytes("r")); // same id, new key signs
         assertGt(usdc.balanceOf(op2), 0);
         // operatorOf is read AT SETTLE TIME, so the payout follows the rotation
@@ -126,9 +126,9 @@ contract JobRegistrySettleTest is JobHarness {
         // the operator's own key relays its own settle: it must still be paid exactly once, as
         // the operator, and never twice — msg.sender plays no part in the distribution
         uint64 t = uint64(block.timestamp);
-        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, 100, t);
+        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, OpSig.usage(100), t);
         vm.prank(op);
-        jr.submitAndSettle(jobId, 100, bytes("r"), t, sig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), t, sig);
         assertEq(usdc.balanceOf(op), 39);
     }
 
@@ -161,12 +161,61 @@ contract JobRegistrySettleTest is JobHarness {
             if (logs[i].topics[0] != JobRegistry.Settled.selector) continue;
             settledCount++;
             assertEq(logs[i].topics[1], jobId); // jobId is the only indexed member
-            (uint32 tok, uint128 fee, bytes memory cid) = abi.decode(logs[i].data, (uint32, uint128, bytes));
+            (uint32 prompt, uint32 cached, uint32 tok, uint128 rateCached, uint128 fee, bytes memory cid) =
+                abi.decode(logs[i].data, (uint32, uint32, uint32, uint128, uint128, bytes));
+            assertEq(prompt, 1000); // promptTok clamps to unitsIn
+            assertEq(cached, 0);
+            assertEq(rateCached, 0);
             assertEq(tok, 2000); // the CLAMPED count is what the log carries, not 99_999
             assertEq(fee, 5); // charge capped at 210; 210 * 250 / 10000 = 5, what the treasury took
             assertEq(cid, bytes("bafy-clamped"));
         }
         assertEq(settledCount, 1);
+    }
+
+    // ── metered input: the backend's prompt and cached counts, the provider's cached rate ─────
+
+    function test_settle_meters_uncached_cached_and_completion_tokens() public {
+        (bytes32 jobId,) = postJob(0);
+        _claim(jobId);
+        uint256 opBefore = usdc.balanceOf(op);
+        _settleUsage(
+            opPk, jobId, Usage({promptTok: 600, cachedTok: 400, completionTok: 1000, rateInCached: 3000}), bytes("r")
+        );
+        // 30_000*200 + 3_000*400 + 90_000*1000 = 97_200_000 atomic-rate units -> ceil 98
+        assertEq(usdc.balanceOf(op) - opBefore, 98);
+        JobView memory v = jr.getJob(jobId);
+        assertEq(v.promptTok, 600);
+        assertEq(v.cachedTok, 400);
+        assertEq(v.completionTok, 1000);
+        assertEq(v.rateInCached, 3000);
+    }
+
+    function test_settle_clamps_every_usage_member_to_the_order() public {
+        (bytes32 jobId,) = postJob(0);
+        _claim(jobId);
+        uint256 opBefore = usdc.balanceOf(op);
+        _settleUsage(
+            opPk, jobId, Usage({promptTok: 5000, cachedTok: 9000, completionTok: 5, rateInCached: 99_999}), bytes("r")
+        );
+        // promptTok -> unitsIn 1000, cachedTok -> promptTok 1000, rateInCached -> rateIn 30_000:
+        // 30_000*1000 + 90_000*5 = 30_450_000 -> ceil 31
+        assertEq(usdc.balanceOf(op) - opBefore, 31);
+        JobView memory v = jr.getJob(jobId);
+        assertEq(v.promptTok, 1000);
+        assertEq(v.cachedTok, 1000);
+        assertEq(v.rateInCached, 30_000);
+    }
+
+    function test_settle_refuses_usage_other_than_what_was_signed() public {
+        (bytes32 jobId,) = postJob(0);
+        _claim(jobId);
+        uint64 t = uint64(block.timestamp);
+        Usage memory signed = Usage({promptTok: 100, cachedTok: 0, completionTok: 10, rateInCached: 0});
+        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, signed, t);
+        Usage memory edited = Usage({promptTok: 1000, cachedTok: 0, completionTok: 10, rateInCached: 0});
+        vm.expectRevert(JobRegistry.NotTheClaimant.selector);
+        jr.submitAndSettle(jobId, edited, bytes("r"), t, sig);
     }
 
     // ── the conservation identity Tasks 7-8 and Plan 2 rely on ────────────────────────────────
@@ -215,7 +264,7 @@ contract JobRegistrySettleTest is JobHarness {
         vm.warp(block.timestamp + 3601);
         bytes memory sig = _settleSig(opPk, jobId, 100);
         vm.expectRevert(JobRegistry.SlaExpired.selector);
-        jr.submitAndSettle(jobId, 100, bytes("r"), uint64(block.timestamp), sig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), uint64(block.timestamp), sig);
         assertEq(usdc.balanceOf(address(jr)), 220); // escrow untouched
         assertEq(jr.activeJobs(pid), 1);
     }
@@ -253,19 +302,19 @@ contract JobRegistrySettleTest is JobHarness {
         (bytes32 jobId,) = postJob(0);
         bytes memory openSig = _settleSig(opPk, jobId, 100);
         vm.expectRevert(JobRegistry.NotClaimed.selector);
-        jr.submitAndSettle(jobId, 100, bytes("r"), uint64(block.timestamp), openSig); // still Open
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), uint64(block.timestamp), openSig); // still Open
         _claim(jobId);
         uint256 strangerPk = 0x57;
         vm.prank(curation);
         reg.register(vm.addr(strangerPk), 4, true, 1000);
         bytes memory strangerSig = _settleSig(strangerPk, jobId, 100);
         vm.expectRevert(JobRegistry.NotTheClaimant.selector); // registered, but not the claimant
-        jr.submitAndSettle(jobId, 100, bytes("r"), uint64(block.timestamp), strangerSig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), uint64(block.timestamp), strangerSig);
         uint64 stale = uint64(block.timestamp); // sign now, land later
-        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, 100, stale);
+        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, OpSig.usage(100), stale);
         vm.warp(block.timestamp + 601);
         vm.expectRevert(JobRegistry.StaleOp.selector);
-        jr.submitAndSettle(jobId, 100, bytes("r"), stale, sig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), stale, sig);
     }
 
     function test_unknown_job_answers_NotClaimed() public {
@@ -274,7 +323,7 @@ contract JobRegistrySettleTest is JobHarness {
         bytes32 ghost = keccak256("no-such-job");
         bytes memory sig = _settleSig(opPk, ghost, 100);
         vm.expectRevert(JobRegistry.NotClaimed.selector);
-        jr.submitAndSettle(ghost, 100, bytes("r"), uint64(block.timestamp), sig);
+        jr.submitAndSettle(ghost, OpSig.usage(100), bytes("r"), uint64(block.timestamp), sig);
     }
 
     function test_settle_refuses_a_zero_recovered_signer() public {
@@ -282,11 +331,11 @@ contract JobRegistrySettleTest is JobHarness {
         _claim(jobId);
         uint64 t = uint64(block.timestamp);
         vm.expectRevert(JobRegistry.NotTheClaimant.selector);
-        jr.submitAndSettle(jobId, 100, bytes("r"), t, ""); // empty: the 65-byte check answers 0
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), t, ""); // empty: the 65-byte check answers 0
         vm.expectRevert(JobRegistry.NotTheClaimant.selector);
-        jr.submitAndSettle(jobId, 100, bytes("r"), t, new bytes(64)); // 64 bytes: same
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), t, new bytes(64)); // 64 bytes: same
         vm.expectRevert(JobRegistry.NotTheClaimant.selector);
-        jr.submitAndSettle(jobId, 100, bytes("r"), t, new bytes(65)); // ecrecover answers 0 itself
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), t, new bytes(65)); // ecrecover answers 0 itself
         assertEq(jr.getJob(jobId).state, 1);
         assertEq(usdc.balanceOf(address(jr)), 220);
     }
@@ -310,7 +359,7 @@ contract JobRegistrySettleTest is JobHarness {
         uint64 t = uint64(block.timestamp);
         jr2.claim(jobId, t, OpSig.signClaim(vm, opPk, jr2, jobId, t));
         vm.expectRevert(JobRegistry.NotTheClaimant.selector);
-        jr2.submitAndSettle(jobId, 100, bytes("r"), t, new bytes(65));
+        jr2.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), t, new bytes(65));
         assertEq(jr2.getJob(jobId).state, 1);
         assertEq(usdc.balanceOf(address(jr2)), 220); // the escrow never moved
     }
@@ -320,13 +369,13 @@ contract JobRegistrySettleTest is JobHarness {
         _claim(jobId);
         bytes memory emptySig = _settleSig(opPk, jobId, 100);
         vm.expectRevert(JobRegistry.EmptyResultCid.selector);
-        jr.submitAndSettle(jobId, 100, bytes(""), uint64(block.timestamp), emptySig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes(""), uint64(block.timestamp), emptySig);
         // a stale op with an empty CID answers StaleOp: freshness is the earlier gate
         uint64 stale = uint64(block.timestamp);
-        bytes memory staleSig = OpSig.signSettle(vm, opPk, jr, jobId, 100, stale);
+        bytes memory staleSig = OpSig.signSettle(vm, opPk, jr, jobId, OpSig.usage(100), stale);
         vm.warp(block.timestamp + 601);
         vm.expectRevert(JobRegistry.StaleOp.selector);
-        jr.submitAndSettle(jobId, 100, bytes(""), stale, staleSig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes(""), stale, staleSig);
         assertEq(usdc.balanceOf(address(jr)), 220);
     }
 
@@ -334,10 +383,10 @@ contract JobRegistrySettleTest is JobHarness {
         (bytes32 jobId,) = postJob(0);
         _claim(jobId);
         uint64 t = uint64(block.timestamp);
-        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, 100, t);
-        jr.submitAndSettle(jobId, 100, bytes("r"), t, sig);
+        bytes memory sig = OpSig.signSettle(vm, opPk, jr, jobId, OpSig.usage(100), t);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), t, sig);
         vm.expectRevert(JobRegistry.NotClaimed.selector); // the persisted row is the replay guard
-        jr.submitAndSettle(jobId, 100, bytes("r"), t, sig);
+        jr.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), t, sig);
         assertEq(usdc.balanceOf(op), 39); // paid exactly once
         assertEq(usdc.balanceOf(address(jr)), 0);
     }
@@ -395,9 +444,9 @@ contract JobRegistrySettleTest is JobHarness {
         jr2.claim(jobId, t, OpSig.signClaim(vm, opPk, jr2, jobId, t));
         assertEq(bad.balanceOf(address(jr2)), 220); // escrow funded, so the pull leg is not at fault
 
-        bytes memory sig = OpSig.signSettle(vm, opPk, jr2, jobId, 100, t);
+        bytes memory sig = OpSig.signSettle(vm, opPk, jr2, jobId, OpSig.usage(100), t);
         vm.expectRevert(JobRegistry.TransferFailed.selector);
-        jr2.submitAndSettle(jobId, 100, bytes("r"), t, sig);
+        jr2.submitAndSettle(jobId, OpSig.usage(100), bytes("r"), t, sig);
         assertEq(jr2.getJob(jobId).state, 1); // the whole settlement rolled back…
         assertEq(jr2.activeJobs(pid2), 1); // …including the slot release…
         assertEq(reg2.reputationOf(pid2), 200); // …and the reward (the seed this registration named)

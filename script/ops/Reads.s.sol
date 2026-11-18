@@ -83,6 +83,9 @@ contract Reads is OpsBase {
         console2.log("  rateIn/Out   ", string.concat(vm.toString(v.rateIn), " / ", vm.toString(v.rateOut)));
         console2.log("  unitsIn/Out  ", string.concat(vm.toString(v.unitsIn), " / ", vm.toString(v.unitsOut)));
         console2.log("  completionTok", uint256(v.completionTok));
+        console2.log("  promptTok    ", uint256(v.promptTok));
+        console2.log("  cachedTok    ", uint256(v.cachedTok));
+        console2.log("  rateInCached ", uint256(v.rateInCached));
         console2.log("  slaSecs      ", uint256(v.slaSecs));
         console2.log("  expiresAt    ", uint256(v.expiresAt));
         console2.log("  claimedAt    ", uint256(v.claimedAt));

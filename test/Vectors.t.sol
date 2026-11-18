@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {AskRegistry} from "../src/AskRegistry.sol";
 import {IUSDC, JobRegistry} from "../src/JobRegistry.sol";
 import {ProviderRegistry} from "../src/ProviderRegistry.sol";
-import {Ask, AskSnapshot, Order} from "../src/Types.sol";
+import {Ask, AskSnapshot, Order, Usage} from "../src/Types.sol";
 import {BaseFork, IFiatToken} from "./utils/BaseFork.sol";
 import {RegSig} from "./utils/RegSig.sol";
 import {VecJson} from "./utils/VecJson.sol";
@@ -60,6 +60,12 @@ contract VectorsTest is BaseFork {
     uint64 internal constant EXPIRES_A = REF_TS + 3600;
     uint64 internal constant EXPIRES_B = REF_TS + 86400;
     uint32 internal constant COMPLETION_TOK = 1500;
+
+    /// @dev The settle case's usage: under order A's ceilings (unitsIn 1000), a cached part, and a
+    /// cached rate under its rateIn (30_000), so every member is a value the contract keeps as is.
+    function _usageA() internal pure returns (Usage memory) {
+        return Usage({promptTok: 900, cachedTok: 300, completionTok: COMPLETION_TOK, rateInCached: 3_000});
+    }
     uint32 internal constant CAPACITY_N = 8;
 
     // The two `c` values are lifted from the coordinator's container-v1.json on purpose: a client
@@ -289,7 +295,7 @@ contract VectorsTest is BaseFork {
             "job_registry",
             VecJson.T_SETTLE(),
             "Settle",
-            VecJson.settleMessage(jobIdA, COMPLETION_TOK, REF_TS),
+            VecJson.settleMessage(jobIdA, _usageA(), REF_TS),
             PROVIDER_PK,
             ""
         );
@@ -542,7 +548,7 @@ contract VectorsTest is BaseFork {
         vm.warp(REF_TS);
         _postOrderA();
         jr.claim(jobIdA, REF_TS, _sig("claim"));
-        jr.submitAndSettle(jobIdA, COMPLETION_TOK, bytes("bafyvorqvectorsresultcid01"), REF_TS, _sig("settle"));
+        jr.submitAndSettle(jobIdA, _usageA(), bytes("bafyvorqvectorsresultcid01"), REF_TS, _sig("settle"));
     }
 
     function test_ClaimAndFailAcceptTheirVectors() public {

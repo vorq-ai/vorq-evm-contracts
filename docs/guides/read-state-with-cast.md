@@ -23,10 +23,10 @@ JOB=$(cast keccak $(cast concat-hex <owner address> <c>))
 `getJob` returns a [`JobView`](../reference/job-registry.md#jobview) and never reverts. Pass the full tuple as the return type:
 
 ```bash
-cast call $JOBS "getJob(bytes32)((bool,bytes32,address,bytes32,uint8,uint8,uint32,uint32,uint32,uint128,uint128,uint32,uint32,uint32,uint32,uint64,uint64,bytes,bytes,uint128))" $JOB --rpc-url $RPC
+cast call $JOBS "getJob(bytes32)((bool,bytes32,address,bytes32,uint8,uint8,uint32,uint32,uint32,uint128,uint128,uint32,uint32,uint32,uint32,uint32,uint128,uint32,uint64,uint64,bytes,bytes,uint128))" $JOB --rpc-url $RPC
 ```
 
-Fields in order: `found, jobId, owner, c, state, endedBecause, providerId, designated, modelId, rateIn, rateOut, unitsIn, unitsOut, completionTok, slaSecs, expiresAt, claimedAt, taskCid, resultCid, gasFee`. `gasFee` is the job's gas fee snapshot. An unknown id returns `found == false` and zeros. See [Job lifecycle](../concepts/job-lifecycle.md) for `state` and `endedBecause`.
+Fields in order: `found, jobId, owner, c, state, endedBecause, providerId, designated, modelId, rateIn, rateOut, unitsIn, unitsOut, completionTok, promptTok, cachedTok, rateInCached, slaSecs, expiresAt, claimedAt, taskCid, resultCid, gasFee`. `gasFee` is the job's gas fee snapshot. An unknown id returns `found == false` and zeros. See [Job lifecycle](../concepts/job-lifecycle.md) for `state` and `endedBecause`.
 
 The escrow cap is not in `JobView`:
 

@@ -22,7 +22,7 @@ None of these reads `msg.sender`; authority is the embedded signature. Signed ty
 | `post(Order order, address owner, bytes orderSig, bytes authSig)` | client (`Order`) | Creates an `Open` job, stores `authSig` (the payment authorization) and snapshots `gasFee`. Emits `Posted`. |
 | `postMany(Order[] orders, address[] owners, bytes[] orderSigs, bytes[] authSigs)` | client, per line | Runs `post` for each line as an external self-call. A refused line emits `PostSkipped(index, reason)` instead of reverting. |
 | `claim(bytes32 jobId, uint64 issuedAt, bytes sig)` | provider operator (`Claim`) | Assigns the job to the signer's provider id, stores `cap`, deletes the stored `authSig`, emits `Claimed`, then pulls `cap + feeCap + gasFeeSnap` with `receiveWithAuthorization`. |
-| `submitAndSettle(bytes32 jobId, uint32 completionTok, bytes resultCid, uint64 issuedAt, bytes sig)` | claiming provider (`Settle`) | Clamps `completionTok` to `unitsOut`, stores it and `resultCid`, reputation +5, pays operator, treasury and client. Emits `Settled`. |
+| `submitAndSettle(bytes32 jobId, Usage usage, bytes resultCid, uint64 issuedAt, bytes sig)` | claiming provider (`Settle`) | `Usage = (uint32 promptTok, uint32 cachedTok, uint32 completionTok, uint128 rateInCached)`. Clamps `promptTok` to `unitsIn`, `cachedTok` to `promptTok`, `completionTok` to `unitsOut` and `rateInCached` to `rateIn`, stores them and `resultCid`, reputation +5, pays operator, treasury and client. Emits `Settled`. |
 | `fail(bytes32 jobId, uint64 issuedAt, bytes sig)` | claiming provider (`Fail`) | Gas fee snapshot to the treasury, the rest to the client, reputation −40 if past `FAIL_GRACE`. Emits `Ended(jobId, 3)`. |
 | `reclaim(bytes32 jobId)` | nobody | After the SLA: gas fee snapshot to the treasury, the rest to the client, reputation −40. Emits `Ended(jobId, 4)`. |
 | `cancel(bytes32 jobId, uint64 issuedAt, bytes sig)` | job owner (`Cancel`) | Ends an `Open` job; no funds move. Emits `Ended(jobId, 2)`. |
@@ -96,14 +96,14 @@ Token and registry calls can also revert with the token's own errors, `TransferF
 | `Posted(bytes32 jobId, uint32 modelId, uint32 designated, address owner, bytes32 c, uint64 expiresAt, uint32 slaSecs, uint128 rateIn, uint128 rateOut, uint32 unitsIn, uint32 unitsOut, uint128 gasFee, bytes taskCid)` | `jobId`, `modelId`, `designated` | `0x9757c213f28b363acd2b1938ceda488e106b20b88b82ff9f068a986ad2824457` |
 | `PostSkipped(uint256 index, bytes reason)` | `index` | `0x0e44fad0f0784bdb805f59ccd2509c265820de2805466bb2b1ec76a30205862f` |
 | `Claimed(bytes32 jobId, uint32 provider, uint64 claimedAt)` | `jobId`, `provider` | `0x9ff987bb77698e24589f4fc36a1daa4345684c255c51ac8030b7f2f97bed93af` |
-| `Settled(bytes32 jobId, uint32 completionTok, uint128 fee, bytes resultCid)` | `jobId` | `0x4ba0aa7b142dc1543dcaaa43dd4f4d6b9a80094440f3dc773dc7d09251fee1a9` |
+| `Settled(bytes32 jobId, uint32 promptTok, uint32 cachedTok, uint32 completionTok, uint128 rateInCached, uint128 fee, bytes resultCid)` | `jobId` | `0x2b74879005a6bbf738b839b0266b33d5dbb9b4ccb2a1a61f08f43f65edf91530` |
 | `Ended(bytes32 jobId, uint8 cause)` | `jobId` | `0xdf704ff689e9d76108fe736861bd4eda8ad2b565106eaea753bea20a1bf9f346` |
 | `FeesChanged(uint16 feeBps, uint128 gasFee)` | — | `0xc4f1b19e28c7452ef005df1e28d41f0896abff20264d65837fa9e8385823835f` |
 | `SlaAllowedChanged(uint32 secs, bool allowed)` | — | `0x92e41ad2fa8f526cab9ad295778472a7ebde41981749b62b3a6e2adddf74e6f0` |
 | `TreasuryChanged(address treasury)` | — | `0xc714d22a2f08b695f81e7c707058db484aa5b4d6b4c9fd64beb10fe85832f608` |
 
 - `Posted.gasFee` is the gas fee snapshotted for the job (`gasFeeSnap`).
-- `Settled.completionTok` is the clamped value. `Settled.fee` is the protocol fee the treasury took on top of the charge.
+- `Settled`'s counts and `rateInCached` are the clamped values. `Settled.fee` is the protocol fee the treasury took on top of the charge.
 - `Ended.cause` is only ever 2, 3 or 4 (see [ended causes](../concepts/job-lifecycle.md#ended-causes)).
 - `PostSkipped.reason` is `post`'s raw revert data: an error selector below, or empty if the line ran out of gas.
 - topic0 is `keccak256` of the canonical signature (types only, no names or `indexed`).
@@ -197,6 +197,9 @@ struct JobView {
     uint32  unitsIn;
     uint32  unitsOut;
     uint32  completionTok;
+    uint32  promptTok;
+    uint32  cachedTok;
+    uint128 rateInCached;
     uint32  slaSecs;
     uint64  expiresAt;
     uint64  claimedAt;
