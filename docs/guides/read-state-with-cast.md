@@ -7,9 +7,9 @@ The examples use the Base deployment. For the [local fork](./run-local-fork.md),
 
 ```bash
 export RPC=https://mainnet.base.org
-export JOBS=<!-- MAINNET-ADDRESS: jobRegistry -->
-export PROVIDERS=<!-- MAINNET-ADDRESS: providerRegistry -->
-export ASKS=<!-- MAINNET-ADDRESS: askRegistry -->
+export JOBS=0x166d56cBB58ba59d1a948729CfC2AB31d4d340Ab
+export PROVIDERS=0x6Da494d3102230148bA9d7a7C0e3865FcD2AdD3D
+export ASKS=0x8cb153B0710E00a115A79Ab31db923128371c07f
 ```
 
 ## Read a job
