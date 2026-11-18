@@ -2,9 +2,9 @@
   "chainId": 8453,
   "dev": false,
   "providerRegistry": "0x6Da494d3102230148bA9d7a7C0e3865FcD2AdD3D",
-  "jobRegistry": "0x166d56cBB58ba59d1a948729CfC2AB31d4d340Ab",
+  "jobRegistry": "0xF7a0b0444d069aEB58091Ff846b64a11C9e7BcdA",
   "askRegistry": "0x8cb153B0710E00a115A79Ab31db923128371c07f",
   "providerRegistryDomainSeparator": "0x5a24ce171bb87c581acd6e635691077e43b6802add3b296b8d31021acc4ff8d6",
-  "jobRegistryDomainSeparator": "0xb5a0471110af1074e465ad959d3e87fd3a8172bfcdf9c1d90fb216b5930a776e",
+  "jobRegistryDomainSeparator": "0x009fe01dcae7cacbafd70a887f1e921bc2af24ea038073dd20bb4b454bb3e43e",
   "askRegistryDomainSeparator": "0x1fc58eca44f5c2fb25546111fc94a9ad625e59d0c3e6a5e56bbd1ff5d903f149"
 }

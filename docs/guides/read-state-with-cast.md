@@ -7,7 +7,7 @@ The examples use the Base deployment. For the [local fork](./run-local-fork.md),
 
 ```bash
 export RPC=https://mainnet.base.org
-export JOBS=0x166d56cBB58ba59d1a948729CfC2AB31d4d340Ab
+export JOBS=0xF7a0b0444d069aEB58091Ff846b64a11C9e7BcdA
 export PROVIDERS=0x6Da494d3102230148bA9d7a7C0e3865FcD2AdD3D
 export ASKS=0x8cb153B0710E00a115A79Ab31db923128371c07f
 ```
