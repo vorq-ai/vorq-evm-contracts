@@ -7,12 +7,12 @@ The contracts are deployed on **Base** mainnet.
 
 ## Base
 
-Chain id **8453**. Address book: [`deployments/base.json`](https://github.com/vorq-ai/vorq-evm-contracts/blob/main/deployments/base.json). Deploy block: 58932765 (`JobRegistry`: 59020219, redeployed 2026-11-18 for metered settlement).
+Chain id **8453**. Address book: [`deployments/base.json`](https://github.com/vorq-ai/vorq-evm-contracts/blob/main/deployments/base.json). Deploy block: 58932765 (`JobRegistry`: 59590939).
 
 | Contract | Address |
 | --- | --- |
 | `ProviderRegistry` | `0x6Da494d3102230148bA9d7a7C0e3865FcD2AdD3D` |
-| `JobRegistry` | `0xF7a0b0444d069aEB58091Ff846b64a11C9e7BcdA` |
+| `JobRegistry` | `0xe09855d7f6d63322Ed625B6Df7138aa03c219888` |
 | `AskRegistry` | `0x8cb153B0710E00a115A79Ab31db923128371c07f` |
 | Payment token (USDC) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
 
@@ -23,7 +23,7 @@ USDC on Base: EIP-712 `name` `USD Coin`, `version` `2`, 6 decimals.
 | Contract (`name`, `version`) | `DOMAIN_SEPARATOR` |
 | --- | --- |
 | `ProviderRegistry` (`VORQ Providers`, `2`) | `0x5a24ce171bb87c581acd6e635691077e43b6802add3b296b8d31021acc4ff8d6` |
-| `JobRegistry` (`VORQ Jobs`, `2`) | `0x009fe01dcae7cacbafd70a887f1e921bc2af24ea038073dd20bb4b454bb3e43e` |
+| `JobRegistry` (`VORQ Jobs`, `2`) | `0x4be9e1ccd7b5d1ded6091bd4aae99bc67fdd3dd13076f4569fb4e7e44afce0ac` |
 | `AskRegistry` (`VORQ Asks`, `2`) | `0x1fc58eca44f5c2fb25546111fc94a9ad625e59d0c3e6a5e56bbd1ff5d903f149` |
 
 A separator rebuilt from `eip712Domain()` that differs from these means a different deployment.
