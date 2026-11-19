@@ -58,7 +58,7 @@ up:
 down:
 	docker compose down --remove-orphans
 
-# The acceptance gate: one real post -> claim -> submitAndSettle, signed the way the protocol
+# The acceptance gate: one real deposit -> claim -> submitAndSettle, signed the way the protocol
 # signs and broadcast through the capped RPC, so what passes here works unchanged against a
 # real range-capped endpoint. forge fails the run when a broadcast transaction reverts, so its
 # exit status is the gate.

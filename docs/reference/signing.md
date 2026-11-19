@@ -1,9 +1,9 @@
 ---
 title: Signing
-description: EIP-712 domains, type strings, typehashes and the USDC payment authorization used by the VORQ contracts.
+description: EIP-712 domains, type strings, typehashes and the USDC deposit authorization used by the VORQ contracts.
 ---
 
-Every client and provider action carries an EIP-712 signature from the acting party. `reclaim` and the curation functions are the only unsigned entry points. Freshness and replay rules are on [Security model](../concepts/security-model.md#replay-and-freshness).
+Every client and provider action carries an EIP-712 signature from the acting party. `reclaim`, `payProvider`, `payRelayer`, `payTreasury` and the curation functions are the only unsigned entry points. Freshness and replay rules are on [Security model](../concepts/security-model.md#replay-and-freshness).
 
 ## Domains
 
@@ -15,7 +15,7 @@ EIP712Domain(string name,string version,uint256 chainId,address verifyingContrac
 
 | Contract | `name` | `version` | `chainId` | `verifyingContract` | Types verified |
 | --- | --- | --- | --- | --- | --- |
-| `JobRegistry` | `VORQ Jobs` | `2` | `block.chainid` at deploy | the `JobRegistry` | `Order`, `Claim`, `Settle`, `Fail`, `Cancel` |
+| `JobRegistry` | `VORQ Jobs` | `2` | `block.chainid` at deploy | the `JobRegistry` | `Order`, `Claim`, `Settle`, `Fail`, `Cancel`, `Withdraw` |
 | `ProviderRegistry` | `VORQ Providers` | `2` | `block.chainid` at deploy | the `ProviderRegistry` | `RequestCapacity`, `SetIdentity` |
 | `AskRegistry` | `VORQ Asks` | `2` | `block.chainid` at deploy | the `AskRegistry` | `AskSnapshot` |
 
@@ -42,30 +42,32 @@ Claim(bytes32 jobId,uint64 issuedAt)
 Settle(bytes32 jobId,uint32 promptTok,uint32 cachedTok,uint32 completionTok,uint128 rateInCached,uint64 issuedAt)
 Fail(bytes32 jobId,uint64 issuedAt)
 Cancel(bytes32 jobId,uint64 issuedAt)
+Withdraw(uint128 amount,uint64 issuedAt)
 ```
 
 | Type | Signed by |
 | --- | --- |
-| `Order` | client; the recovered signer must equal the `owner` argument of `post` |
+| `Order` | client; the recovered signer must equal the `owner` argument of `claim` |
 | `Claim` | any registered operator; resolved to a provider id |
 | `Settle`, `Fail` | the operator of the provider that claimed the job |
-| `Cancel` | the job owner |
+| `Cancel` | the order owner; `jobId = keccak256(abi.encodePacked(owner, c))` |
+| `Withdraw` | the balance owner; the recovered signer must equal the `owner` argument of `withdraw`, and `issuedAt` must be above the owner's last withdrawal's |
 
 `Order` fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `c` | `bytes32` | Payload commitment; `jobId = keccak256(abi.encodePacked(owner, c))`. Fresh per job. |
-| `modelId` | `uint32` | Catalog model id; must exist and be enabled at `post`. |
-| `slaSecs` | `uint32` | Must be an allowed SLA at `post`. |
+| `modelId` | `uint32` | Catalog model id; must exist and be enabled at `claim`. |
+| `slaSecs` | `uint32` | Must be an allowed SLA at `claim`. |
 | `rateIn` | `uint128` | Atomic units per input unit × `RATE_SCALE`. |
 | `rateOut` | `uint128` | Atomic units per output unit × `RATE_SCALE`. |
 | `unitsIn` | `uint32` | Maximum input units. |
 | `unitsOut` | `uint32` | Maximum output units. |
 | `designated` | `uint32` | Provider id, or `0` for any provider. |
-| `expiresAt` | `uint64` | Unix seconds; at most `MAX_EXPIRY` (86,400 s) ahead at `post`. |
+| `expiresAt` | `uint64` | Unix seconds; the order cannot be claimed after it, nor while it is more than `MAX_EXPIRY` (86,400 s) ahead. |
 
-Not signed: the Solidity `Order` struct's tenth member `taskCid`, the `authSig` argument of `post`, and the `resultCid` argument of `submitAndSettle`. See [unsigned parameters](../concepts/security-model.md#unsigned-parameters).
+Not signed: the Solidity `Order` struct's tenth member `taskCid`, and the `resultCid` argument of `submitAndSettle`. See [unsigned parameters](../concepts/security-model.md#unsigned-parameters).
 
 ### ProviderRegistry (`VORQ Providers`)
 
@@ -94,15 +96,16 @@ Signed by the operator of `providerId`. The second line is the full encoded type
 | `Settle` | `JobRegistry.SETTLE_TYPEHASH` | `0x85d2b9b4329dab43c509568a439b97db47deb525379a4774834969a4aeb5b756` |
 | `Fail` | `JobRegistry.FAIL_TYPEHASH` | `0x7b55bc6e850c33643ce0bcd3046c87851a9659ecb6d541612cdb4bef5a8d1269` |
 | `Cancel` | `JobRegistry.CANCEL_TYPEHASH` | `0x571302868b9c6729294600c0b1e1dcd58dfe44e82f479f1f68c7b68669562a94` |
+| `Withdraw` | `JobRegistry.WITHDRAW_TYPEHASH` | `0xedc052d3b52f9b93fc5b0db172c1d5f96b11742424b8d3b2077d1843cf7b6ce4` |
 | `RequestCapacity` | `ProviderRegistry.REQUEST_CAPACITY_TYPEHASH` | `0x1cc140b451b7b8bb60ac573bbe29ca7b37d6d80863e1015939a6b91d18586075` |
 | `SetIdentity` | `ProviderRegistry.SET_IDENTITY_TYPEHASH` | `0x69fa5ea756b6031e7f884ca04caa57f17c175a6415125c3246d07776881afd1d` |
 | `Ask` | `AskRegistry.ASK_TYPEHASH` | `0x4fadd8d1027fd2cdf6dc25ac6cb3d6ec9086a535c3f8e1c0e5cb80bb9acb2ef4` |
 | `AskSnapshot` | `AskRegistry.SNAPSHOT_TYPEHASH` | `0xfa55cbb0125320b1af05486ce48f1e655c7143a975aa0442af5801ceac80236e` |
 | `EIP712Domain` | — | `0x8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f` |
 
-## Payment authorization (EIP-3009)
+## Deposit authorization (EIP-3009)
 
-Escrow is pulled with the payment token's `receiveWithAuthorization`. The client signs it before `post`, `post` stores it, and `claim` executes it once. It is signed on the **token's** domain:
+A deposit is pulled with the payment token's `receiveWithAuthorization`. The client signs it, any relayer lands it with `deposit`, and the token executes it once. It is signed on the **token's** domain:
 
 ```
 domain = { name: token.name(), version: token.version(), chainId, verifyingContract: <token address> }
@@ -113,20 +116,17 @@ Typehash: `0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8`.
 
 | Field | Value |
 | --- | --- |
-| `from` | the order `owner` |
+| `from` | the balance `owner` |
 | `to` | the `JobRegistry` address |
-| `value` | `cap + floor(cap · feeBps / 10000) + gasFee`; see [payment authorization amount](../concepts/escrow-and-fees.md#payment-authorization-amount) |
+| `value` | the amount pulled; `value − depositFee` is credited. See [deposit authorization](../concepts/escrow-and-fees.md#deposit-authorization) |
 | `validAfter` | `0` |
-| `validBefore` | `order.expiresAt + 1` |
-| `nonce` | `jobId` |
+| `validBefore` | the signer's deadline (the SDKs use one hour) |
+| `nonce` | any fresh `bytes32` (the SDKs use a random one) |
 
-- A wrong `value` surfaces as a token revert inside `claim`, not at `post`.
-- Only the payee (`to == msg.sender`) can execute a receive authorization, so the signature in public `post` calldata can be spent only by the `JobRegistry`.
-- `validBefore` is `expiresAt + 1` because the token requires `block.timestamp < validBefore` while `claim` accepts `block.timestamp == expiresAt`.
-- `nonce = jobId` makes the authorization single-use and bound to one job. The nonce does not include the registry address.
-- A stored authorization cannot be replaced.
+- Only the payee (`to == msg.sender`) can execute a receive authorization, so the signature in public `deposit` calldata can be spent only by the `JobRegistry`.
+- The token burns each `nonce` per `from`, so an authorization lands once.
 - Read the token's `name` and `version` on chain. For USDC on Base they are `USD Coin` and `2`.
 
 ## Test vectors
 
-[`vectors/signing-v3.json`](https://github.com/vorq-ai/vorq-evm-contracts/blob/main/vectors/signing-v3.json) holds domains, typed data, digests, signers and signatures for every type above plus the payment authorization, computed at the [local fork](../guides/run-local-fork.md) addresses on chain id `84532` with Anvil's public dev keys. The file also carries vectors for off-chain VORQ message types that no contract verifies. [Verify an EIP-712 signature](../guides/verify-eip712-signature.md) walks through one case.
+[`vectors/signing-v3.json`](https://github.com/vorq-ai/vorq-evm-contracts/blob/main/vectors/signing-v3.json) holds domains, typed data, digests, signers and signatures for every type above plus the deposit authorization (case `payment-authorization`), computed at the [local fork](../guides/run-local-fork.md) addresses on chain id `84532` with Anvil's public dev keys. The file also carries vectors for off-chain VORQ message types that no contract verifies. [Verify an EIP-712 signature](../guides/verify-eip712-signature.md) walks through one case.

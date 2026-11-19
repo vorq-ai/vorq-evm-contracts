@@ -38,7 +38,7 @@ A skipped entry writes and emits nothing, so the reason is not visible on chain.
 - A quote with only one nonzero rate is valid, for example an input-metered model with `rateOut == 0`.
 - `AsksPublished` carries the whole snapshot. An empty `quotes` array is valid: it advances the floor and emits an empty list, but clears no storage.
 - One `lastSignedAt` floor per provider. An exact duplicate is skipped, so retries are safe.
-- Only `idOf` is checked. Listing, capacity and model status are enforced at `post` and `claim`, not here.
+- Only `idOf` is checked. Listing, capacity and model status are enforced at `claim`, not here.
 - After an operator key rotation, snapshots signed by the old key are skipped, including replays of ones already published.
 
 ## Views

@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {AskRegistry} from "../src/AskRegistry.sol";
 import {IUSDC, JobRegistry} from "../src/JobRegistry.sol";
 import {ProviderRegistry} from "../src/ProviderRegistry.sol";
-import {Ask, AskSnapshot, Order, Usage} from "../src/Types.sol";
+import {Ask, AskSnapshot, Order, Terms, Usage} from "../src/Types.sol";
 import {BaseFork, IFiatToken} from "./utils/BaseFork.sol";
 import {RegSig} from "./utils/RegSig.sol";
 import {VecJson} from "./utils/VecJson.sol";
@@ -67,6 +67,8 @@ contract VectorsTest is BaseFork {
         return Usage({promptTok: 900, cachedTok: 300, completionTok: COMPLETION_TOK, rateInCached: 3_000});
     }
     uint32 internal constant CAPACITY_N = 8;
+    /// @dev the withdraw case's amount: 0.001 USDC, under what the deposit vector credits
+    uint128 internal constant WITHDRAW_AMOUNT = 1_000;
 
     // The two `c` values are lifted from the coordinator's container-v1.json on purpose: a client
     // that builds a container, commits it and then signs the order can chain the two vector files
@@ -159,11 +161,12 @@ contract VectorsTest is BaseFork {
         jobIdA = keccak256(abi.encodePacked(client, C_A));
         jobIdB = keccak256(abi.encodePacked(client, C_B));
         Order memory a = _orderA();
-        // the exact claim pull, cap + feeCap + gasFee, at the constructor's 1% fee. This amount is
-        // EMITTED into signing-v3.json: a fee change here re-cuts the vector.
+        // the deposit that funds exactly order A's lock: cap + feeCap + gasFee at the constructor's
+        // fees, plus the deposit fee taken from it. This amount is EMITTED into signing-v3.json: a
+        // fee change here re-cuts the vector.
         uint256 cap =
             (uint256(a.rateIn) * a.unitsIn + uint256(a.rateOut) * a.unitsOut + jr.RATE_SCALE() - 1) / jr.RATE_SCALE();
-        amountA = cap + cap * jr.feeBps() / 10_000 + jr.gasFee();
+        amountA = cap + cap * jr.feeBps() / 10_000 + jr.gasFee() + jr.depositFee();
     }
 
     // ===========================================================================================
@@ -282,7 +285,7 @@ contract VectorsTest is BaseFork {
     }
 
     function _cases() internal view returns (Case[] memory cs) {
-        cs = new Case[](15);
+        cs = new Case[](16);
         cs[0] = _orderCase("order-designated", _orderA(), jobIdA);
         cs[1] = _orderCase("order-open", _orderB(), jobIdB);
         cs[2] =
@@ -316,18 +319,28 @@ contract VectorsTest is BaseFork {
         cs[12] = _releaseCase();
         cs[13] = _handoverAuthCase();
         cs[14] = _sessionCase();
+        cs[15] = _case(
+            "withdraw",
+            "job_registry",
+            VecJson.T_WITHDRAW(),
+            "Withdraw",
+            VecJson.withdrawMessage(WITHDRAW_AMOUNT, REF_TS),
+            CLIENT_PK,
+            ""
+        );
     }
 
-    /// @dev The one case whose type belongs to somebody else: EIP-3009 is the payment token's, and
-    /// the client signs it in the TOKEN's domain so only the JobRegistry (`to`) can execute it.
-    /// `nonce` is the jobId, which is what makes the authorization single-use per job.
+    /// @dev The one case whose type belongs to somebody else: the deposit authorization. EIP-3009 is
+    /// the payment token's, and the client signs it in the TOKEN's domain so only the JobRegistry
+    /// (`to`) can execute it. `nonce` is any fresh bytes32; this vector uses order A's jobId as its
+    /// fixed value, and `validBefore` is order A's expiry plus one.
     function _authCase() internal view returns (Case memory) {
         return _case(
             "payment-authorization",
             "payment_token",
             VecJson.T_RECEIVE_AUTH(),
             "ReceiveWithAuthorization",
-            VecJson.authMessage(client, address(jr), amountA, EXPIRES_A, jobIdA),
+            VecJson.authMessage(client, address(jr), amountA, uint256(EXPIRES_A) + 1, jobIdA),
             CLIENT_PK,
             string.concat('{"job_id":', VecJson.h(jobIdA), ',"amount":', VecJson.s(amountA), "}")
         );
@@ -532,38 +545,66 @@ contract VectorsTest is BaseFork {
         revert(string.concat("no case named ", name));
     }
 
-    function _postOrderA() internal {
-        jr.post(_orderA(), client, _sig("order-designated"), _sig("payment-authorization"));
+    function _depositA() internal {
+        jr.deposit(client, amountA, uint256(EXPIRES_A) + 1, jobIdA, _sig("payment-authorization"));
     }
 
-    function test_PostAndCancelAcceptTheirVectors() public {
+    function _claimOrderA() internal {
+        jr.claim(_orderA(), client, _sig("order-designated"), REF_TS, _sig("claim"));
+    }
+
+    function _termsA() internal view returns (Terms memory) {
+        Order memory a = _orderA();
+        return Terms(client, a.rateIn, a.rateOut, a.unitsIn, a.unitsOut, a.slaSecs, jr.gasFee(), address(this));
+    }
+
+    /// @dev deposit is what hands the authorization to real USDC, so a wrong domain or member
+    /// surfaces here as `FiatTokenV2: invalid signature`. The deposit funds order A's lock exactly.
+    function test_DepositAcceptsThePaymentAuthorizationVector() public {
         vm.warp(REF_TS);
-        _postOrderA();
-        jr.cancel(jobIdA, REF_TS, _sig("cancel"));
+        _depositA();
+        assertEq(jr.balanceOf(client), amountA - jr.depositFee());
     }
 
-    /// @dev claim is what hands the authorization to real USDC, so a wrong domain or member
-    /// surfaces here as `FiatTokenV2: invalid signature`.
+    function test_CancelAcceptsItsVector() public {
+        vm.warp(REF_TS);
+        jr.cancel(client, C_A, REF_TS, _sig("cancel"));
+        assertEq(jr.getJob(jobIdA).endedBecause, 2);
+    }
+
     function test_ClaimAndSettleAcceptTheirVectors() public {
         vm.warp(REF_TS);
-        _postOrderA();
-        jr.claim(jobIdA, REF_TS, _sig("claim"));
-        jr.submitAndSettle(jobIdA, _usageA(), bytes("bafyvorqvectorsresultcid01"), REF_TS, _sig("settle"));
+        _depositA();
+        _claimOrderA();
+        assertEq(jr.balanceOf(client), 0, "the deposit vector funds order A's lock exactly");
+        jr.submitAndSettle(jobIdA, _termsA(), _usageA(), bytes("bafyvorqvectorsresultcid01"), REF_TS, _sig("settle"));
     }
 
     function test_ClaimAndFailAcceptTheirVectors() public {
         vm.warp(REF_TS);
-        _postOrderA();
-        jr.claim(jobIdA, REF_TS, _sig("claim"));
-        jr.fail(jobIdA, REF_TS, _sig("fail"));
+        _depositA();
+        _claimOrderA();
+        jr.fail(jobIdA, _termsA(), REF_TS, _sig("fail"));
     }
 
-    /// @dev The open order carries `designated = 0`, the sentinel for any provider. It reuses the
-    /// authorization vector deliberately: `post` parks the authorization but does not spend it, so
-    /// what is under test here is the Order signature alone.
-    function test_PostAcceptsTheOpenOrderVector() public {
+    /// @dev The open order carries `designated = 0`, the sentinel for any provider. Its Claim is
+    /// signed here rather than taken from a vector: what is under test is the Order signature.
+    function test_ClaimAcceptsTheOpenOrderVector() public {
         vm.warp(REF_TS);
-        jr.post(_orderB(), client, _sig("order-open"), _sig("payment-authorization"));
+        _depositA();
+        uint64 t = REF_TS;
+        bytes32 structHash = keccak256(abi.encode(jr.CLAIM_TYPEHASH(), jobIdB, t));
+        (uint8 v, bytes32 r, bytes32 s_) =
+            vm.sign(PROVIDER_PK, keccak256(abi.encodePacked("\x19\x01", jr.DOMAIN_SEPARATOR(), structHash)));
+        jr.claim(_orderB(), client, _sig("order-open"), t, abi.encodePacked(r, s_, v));
+        assertEq(jr.getJob(jobIdB).state, 1);
+    }
+
+    function test_WithdrawAcceptsItsVector() public {
+        vm.warp(REF_TS);
+        _depositA();
+        jr.withdraw(client, WITHDRAW_AMOUNT, REF_TS, _sig("withdraw"));
+        assertEq(jr.balanceOf(client), amountA - jr.depositFee() - WITHDRAW_AMOUNT);
     }
 
     function test_RequestCapacityAcceptsItsVector() public {

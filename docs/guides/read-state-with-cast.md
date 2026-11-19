@@ -23,16 +23,21 @@ JOB=$(cast keccak $(cast concat-hex <owner address> <c>))
 `getJob` returns a [`JobView`](../reference/job-registry.md#jobview) and never reverts. Pass the full tuple as the return type:
 
 ```bash
-cast call $JOBS "getJob(bytes32)((bool,bytes32,address,bytes32,uint8,uint8,uint32,uint32,uint32,uint128,uint128,uint32,uint32,uint32,uint32,uint32,uint128,uint32,uint64,uint64,bytes,bytes,uint128))" $JOB --rpc-url $RPC
+cast call $JOBS "getJob(bytes32)((bool,bytes32,uint8,uint8,uint32,uint64))" $JOB --rpc-url $RPC
 ```
 
-Fields in order: `found, jobId, owner, c, state, endedBecause, providerId, designated, modelId, rateIn, rateOut, unitsIn, unitsOut, completionTok, promptTok, cachedTok, rateInCached, slaSecs, expiresAt, claimedAt, taskCid, resultCid, gasFee`. `gasFee` is the job's gas fee snapshot. An unknown id returns `found == false` and zeros. See [Job lifecycle](../concepts/job-lifecycle.md) for `state` and `endedBecause`.
+Fields in order: `found, jobId, state, endedBecause, providerId, claimedAt`. An id with no row (an order never claimed, or no order at all) returns `found == false` and zeros. See [Job lifecycle](../concepts/job-lifecycle.md) for `state` and `endedBecause`. The order itself — owner, rates, units, SLA, expiry, gas fee, `taskCid` — is in the job's `Posted` log, and the delivered counts and fee in its `Settled` log; see [Query logs](#query-logs).
 
-The escrow cap is not in `JobView`:
+## Read the ledger
 
 ```bash
-cast call $JOBS "capOf(bytes32)(uint128)" $JOB --rpc-url $RPC
+cast call $JOBS "balanceOf(address)(uint128)" <owner address> --rpc-url $RPC   # unlocked balance
+cast call $JOBS "earned(uint32)(uint128)" 1 --rpc-url $RPC                     # provider 1, unpaid
+cast call $JOBS "relayerEarned(address)(uint128)" <relayer address> --rpc-url $RPC  # relayer, unpaid
+cast call $JOBS "accrued()(uint128)" --rpc-url $RPC                            # treasury, unpaid
 ```
+
+All four are atomic USDC (6 decimals): `1000000` is $1.
 
 ## Read a provider
 
@@ -73,7 +78,8 @@ cast call $ASKS "lastSignedAt(uint32)(uint64)" <providerId> --rpc-url $RPC
 
 ```bash
 cast call $JOBS "feeBps()(uint16)" --rpc-url $RPC
-cast call $JOBS "gasFee()(uint128)" --rpc-url $RPC
+cast call $JOBS "gasFee()(uint64)" --rpc-url $RPC
+cast call $JOBS "depositFee()(uint64)" --rpc-url $RPC
 cast call $JOBS "treasury()(address)" --rpc-url $RPC
 cast call $JOBS "allowedSla(uint32)(bool)" 86400 --rpc-url $RPC
 cast call $PROVIDERS "isJobRegistry(address)(bool)" $JOBS --rpc-url $RPC
@@ -89,6 +95,7 @@ From the repository root, the read-only targets bind to the address book in [`de
 make read-config RPC=$RPC                           # every live parameter, models, SLAs
 make read-provider ID=1 RPC=$RPC
 make read-job JOB=0x… RPC=$RPC
+make read-relayer RELAYER=0x… RPC=$RPC              # a relayer's unpaid gas and deposit fees
 make read-asks ID=1 MODEL=2 SLA=86400 RPC=$RPC
 make read-allowlist MEASUREMENT=<64 hex, no 0x> RPC=$RPC
 make doctor RPC=$RPC                                # wiring, separators, treasury, fees
@@ -108,9 +115,9 @@ cast logs --address $JOBS \
 
 Public RPCs cap the block range of `eth_getLogs` (the local fork proxy allows 5,000 blocks); use a provider RPC for wide scans and query in chunks.
 
-## Decode a revert or a skipped line
+## Decode a revert
 
-Every custom error takes no arguments, so revert data is a 4-byte selector. `PostSkipped.reason` is the same selector for the line `post` refused; an empty `reason` means the line ran out of gas. Look it up in the error tables of the [JobRegistry reference](../reference/job-registry.md#errors), or:
+Every custom error takes no arguments, so revert data is a 4-byte selector. Look it up in the error tables of the [JobRegistry reference](../reference/job-registry.md#errors), or:
 
 ```bash
 cast decode-error 0x5276902d    # StaleOp()

@@ -1,309 +1,400 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 pragma solidity 0.8.30;
 
+import {Test} from "forge-std/Test.sol";
 import {JobRegistry, IUSDC} from "../src/JobRegistry.sol";
 import {ProviderRegistry} from "../src/ProviderRegistry.sol";
+import "../src/Types.sol";
+import {IFiatToken} from "./utils/BaseFork.sol";
 import {JobHarness} from "./utils/JobHarness.sol";
+import {AuthSig} from "./utils/AuthSig.sol";
 import {OpSig} from "./utils/OpSig.sol";
-import {FalseTransferToken} from "./utils/TestDoubles.sol";
+import {OrderSig} from "./utils/OrderSig.sol";
 
-/// @notice R23's net. Escrow funds exactly once, at claim, for `cap + feeCap + gasFeeSnap`, and resolves
-/// exactly once: distributed at settle, split at fail and reclaim into the gas fee snapshot for the
-/// treasury and the rest for the owner, never funded at all on
-/// a cancel-from-Open. Every one of those four exits must also hand the provider's capacity slot
-/// back. No earlier suite can catch a missing `activeJobs` decrement — each one only ever sees its
-/// own path — so both halves are asserted here, for all four.
+/// @notice R23's net. Every claim locks `cap + feeCap + gasFee` out of the owner's balance and
+/// every lock resolves exactly once: split at settle, released at fail and reclaim with the gas fee
+/// to the claim's relayer, never taken at all by a cancel. Each exit also hands the provider's
+/// capacity slot back. And across any sequence of ops:
+///
+///   USDC held == Σ balances + Σ live locks + Σ earned + Σ relayerEarned + accrued
 contract EscrowInvariantTest is JobHarness {
-    /// @dev feeBps 100 — the protocol's real fee — and gasFee 5, set BEFORE any post, so
-    /// `gasFeeSnap` is 5 and the lock below is `cap + feeCap + gasFeeSnap == 210 + 2 + 5`
-    /// (feeCap = 210*100/10000, floored). One test raises `feeBps` to the 1000 ceiling before its
-    /// own post to sweep the fee leg at a rate that cannot floor away; another raises the gas fee
-    /// mid-flight to prove it cannot reach a refund.
+    /// @dev feeBps 100 — the protocol's real fee — gasFee 5 and depositFee 0: the reference lock is
+    /// `cap + feeCap + gasFee == 210 + 2 + 5 == 217`. One test raises `feeBps` to the 1000 ceiling
+    /// before its own claim to sweep the fee leg at a rate that cannot floor away.
     function _fees() internal override {
         vm.prank(curation);
-        jr.setFees(100, 5);
+        jr.setFees(100, 5, 0);
+    }
+
+    function _assertConserved(uint256 liveLocks, string memory why) private view {
+        assertEq(
+            usdc.balanceOf(address(jr)),
+            uint256(jr.balanceOf(client)) + liveLocks + jr.earned(pid) + jr.relayerEarned(address(this)) + jr.accrued(),
+            why
+        );
     }
 
     /// forge-config: default.fuzz.runs = 256
-    function testFuzz_every_funded_lock_resolves_exactly_once(uint8 exitPath, uint32 tok) public {
-        (bytes32 jobId,) = postJob(0);
-        uint256 clientBefore = usdc.balanceOf(client);
-        _claim(jobId);
-        uint256 locked = clientBefore - usdc.balanceOf(client);
-        assertEq(locked, 210 + 2 + 5); // cap + feeCap (210*100/10000, floored) + gasFeeSnap
-        uint256 clientAfterClaim = usdc.balanceOf(client);
+    function testFuzz_every_lock_resolves_exactly_once(uint8 exitPath, uint32 tok) public {
+        bytes32 jobId = _claim(_ref(0));
+        uint256 locked = START - jr.balanceOf(client);
+        assertEq(locked, 210 + 2 + 5);
+        _assertConserved(locked, "after claim");
         if (exitPath % 3 == 0) {
             _settle(opPk, jobId, tok, bytes("r"));
         } else if (exitPath % 3 == 1) {
             _fail(opPk, jobId);
         } else {
             vm.warp(block.timestamp + 3601);
-            jr.reclaim(jobId);
+            _reclaim(jobId);
         }
-        // conservation: registry drained to zero for this job, and every atom accounted for. The
-        // three possible payees are the only accounts a payout leg can name; the submitter (this
-        // test contract) is never one of them.
-        assertEq(usdc.balanceOf(address(jr)), 0);
-        uint256 paid = (usdc.balanceOf(client) - clientAfterClaim) + usdc.balanceOf(op) + usdc.balanceOf(treasury);
-        assertEq(paid, locked);
-        assertEq(paid, uint256(jr.capOf(jobId)) + 2 + 5); // == cap + feeCap + gasFeeSnap, off the row itself
-        assertEq(usdc.balanceOf(address(this)), 0);
-        // R23's other half: the claim's increment is released on whichever path was taken
-        assertEq(jr.activeJobs(pid), 0);
+        _assertConserved(0, "after the exit");
+        // every atom of the lock went to exactly one of the four ledgers
+        assertEq(
+            (jr.balanceOf(client) - (START - locked)) + jr.earned(pid) + jr.relayerEarned(address(this)) + jr.accrued(),
+            locked
+        );
+        assertEq(jr.activeJobs(pid), 0); // R23's other half
 
-        // a second exit of any kind must revert — or, for cancel, no-op — without moving funds
-        uint256 snapshot = usdc.balanceOf(client);
+        // a second exit of any kind must revert — or, for cancel, no-op — without moving anything
+        Terms memory terms = termsOf[jobId];
+        uint256 snapshot = jr.balanceOf(client);
         uint64 t = uint64(block.timestamp);
         bytes memory settleSig = _settleSig(opPk, jobId, 1);
         vm.expectRevert(JobRegistry.NotClaimed.selector);
-        jr.submitAndSettle(jobId, OpSig.usage(1), bytes("r"), t, settleSig);
+        jr.submitAndSettle(jobId, terms, OpSig.usage(1), bytes("r"), t, settleSig);
         bytes memory failSig = _failSig(opPk, jobId);
         vm.expectRevert(JobRegistry.NotClaimed.selector);
-        jr.fail(jobId, t, failSig);
+        jr.fail(jobId, terms, t, failSig);
         vm.expectRevert(JobRegistry.NotClaimed.selector);
-        jr.reclaim(jobId);
-        _cancelAs(clientPk, jobId); // a terminal row is a silent no-op for cancel, not a revert
-        assertEq(usdc.balanceOf(client), snapshot);
-        assertEq(usdc.balanceOf(address(jr)), 0);
+        jr.reclaim(jobId, terms);
+        _cancelAs(clientPk, _ref(0).c);
+        assertEq(jr.balanceOf(client), snapshot);
         assertEq(jr.activeJobs(pid), 0);
+
+        // and the books pay out to the last atom: the contract ends holding nothing
+        uint256 relayerPaid = _payOutEverything();
+        assertEq(usdc.balanceOf(address(jr)), 0);
+        assertEq(
+            usdc.balanceOf(client) + usdc.balanceOf(op) + usdc.balanceOf(treasury) + relayerPaid,
+            WALLET,
+            "supply conserved"
+        );
     }
 
     function test_all_four_terminal_paths_release_the_slot_and_leave_no_dust() public {
-        // the deterministic companion to the fuzz: all four exits in one sequence, so a missing
-        // decrement — or a wrong refund AMOUNT — on ANY of them fails here rather than only on the
-        // fuzz branch that happened to pick that path. Each leg captures the client balance across
-        // its own exit, so `paid == cap + feeCap + gasFeeSnap` is pinned four times over.
-        bytes32 a = _refOrder(keccak256("path-settle"));
-        _claim(a);
+        bytes32 a = _claim(_refC(keccak256("path-settle")));
         assertEq(jr.activeJobs(pid), 1);
-        uint256 beforeSettle = usdc.balanceOf(client);
+        _assertConserved(217, "a locked");
         _settle(opPk, a, 1500, bytes("r"));
-        // settle SPLITS the lock three ways, so the identity is the sum over every payee (both are
-        // still empty at this point, this being the first exit)
-        assertEq(
-            (usdc.balanceOf(client) - beforeSettle) + usdc.balanceOf(op) + usdc.balanceOf(treasury),
-            uint256(jr.capOf(a)) + 2 + 5,
-            "settle must distribute the whole lock"
-        );
         assertEq(jr.activeJobs(pid), 0, "settle must release the slot");
-        assertEq(usdc.balanceOf(address(jr)), 0, "settle must drain the escrow");
+        _assertConserved(0, "settle must credit the whole lock");
 
-        bytes32 b = _refOrder(keccak256("path-fail"));
-        _claim(b);
-        assertEq(jr.activeJobs(pid), 1);
-        uint256 beforeFail = usdc.balanceOf(client);
-        uint256 treasuryBeforeFail = usdc.balanceOf(treasury);
+        bytes32 b = _claim(_refC(keccak256("path-fail")));
+        uint256 beforeFail = jr.balanceOf(client);
+        uint256 relayerBefore = jr.relayerEarned(address(this));
         _fail(opPk, b);
-        // fail pays two legs: the gas fee snapshot to the treasury, everything else to the owner
-        assertEq(usdc.balanceOf(client) - beforeFail, uint256(jr.capOf(b)) + 2, "fail must refund cap + feeCap");
-        assertEq(usdc.balanceOf(treasury) - treasuryBeforeFail, 5, "fail must pay the treasury the gas fee");
+        assertEq(jr.balanceOf(client) - beforeFail, 212, "fail must release cap + feeCap");
+        assertEq(jr.relayerEarned(address(this)) - relayerBefore, 5, "fail must pay the relayer the gas fee");
         assertEq(jr.activeJobs(pid), 0, "fail must release the slot");
-        assertEq(usdc.balanceOf(address(jr)), 0, "fail must drain the escrow");
+        _assertConserved(0, "after fail");
 
-        bytes32 c = _refOrder(keccak256("path-reclaim"));
-        _claim(c);
-        assertEq(jr.activeJobs(pid), 1);
+        bytes32 c = _claim(_refC(keccak256("path-reclaim")));
         vm.warp(block.timestamp + 3601);
-        uint256 beforeReclaim = usdc.balanceOf(client);
-        uint256 treasuryBeforeReclaim = usdc.balanceOf(treasury);
-        jr.reclaim(c);
-        assertEq(usdc.balanceOf(client) - beforeReclaim, uint256(jr.capOf(c)) + 2, "reclaim must refund cap + feeCap");
-        assertEq(usdc.balanceOf(treasury) - treasuryBeforeReclaim, 5, "reclaim must pay the treasury the gas fee");
+        uint256 beforeReclaim = jr.balanceOf(client);
+        relayerBefore = jr.relayerEarned(address(this));
+        _reclaim(c);
+        assertEq(jr.balanceOf(client) - beforeReclaim, 212, "reclaim must release cap + feeCap");
+        assertEq(jr.relayerEarned(address(this)) - relayerBefore, 5, "reclaim must pay the relayer the gas fee");
         assertEq(jr.activeJobs(pid), 0, "reclaim must release the slot");
-        assertEq(usdc.balanceOf(address(jr)), 0, "reclaim must drain the escrow");
+        _assertConserved(0, "after reclaim");
 
-        // cancel-from-Open: never funded, so it never took a slot to give back either
-        bytes32 d = _refOrder(keccak256("path-cancel"));
-        uint256 clientBefore = usdc.balanceOf(client);
-        assertEq(jr.activeJobs(pid), 0);
-        _cancelAs(clientPk, d);
-        assertEq(jr.activeJobs(pid), 0, "an unclaimed job never took a slot");
+        // cancel of an unclaimed order: never locked, so it never took a slot to give back either
+        uint256 clientBefore = jr.balanceOf(client);
+        _cancelAs(clientPk, keccak256("path-cancel"));
+        assertEq(jr.activeJobs(pid), 0, "an unclaimed order never took a slot");
+        assertEq(jr.balanceOf(client), clientBefore, "cancel moves no funds");
+        _assertConserved(0, "after cancel");
+
+        uint256 relayerPaid = _payOutEverything();
         assertEq(usdc.balanceOf(address(jr)), 0);
-        assertEq(usdc.balanceOf(client), clientBefore, "cancel moves no funds");
-        assertEq(jr.capOf(d), 0, "`cap` is written by claim, and claim never ran");
-
-        // and across the whole sweep no atom was created or destroyed: the client was the only
-        // account ever minted to, and the registry holds nothing
         assertEq(
-            usdc.balanceOf(client) + usdc.balanceOf(op) + usdc.balanceOf(treasury), 1e24, "supply is conserved too"
+            usdc.balanceOf(client) + usdc.balanceOf(op) + usdc.balanceOf(treasury) + relayerPaid,
+            WALLET,
+            "supply conserved"
         );
-    }
-
-    function test_reclaim_refunds_cap_plus_fee_cap_and_pays_the_treasury_the_gasFee_snapshot() public {
-        bytes32 jobId = _refOrder(keccak256("reclaim-money"));
-        _claim(jobId);
-        // a NEW gas fee may not reach the treasury leg: the escrow's size was fixed at post and
-        // reclaim pays out exactly the snapshot, the rest to the owner. feeBps stays at the suite's
-        // 100 — conservation only holds while it is unchanged between the claim and the terminal call.
-        vm.prank(curation);
-        jr.setFees(100, 999);
-        uint256 clientBefore = usdc.balanceOf(client);
-        vm.warp(block.timestamp + 3601);
-        jr.reclaim(jobId);
-        assertEq(usdc.balanceOf(client) - clientBefore, uint256(jr.capOf(jobId)) + 2);
-        assertEq(usdc.balanceOf(op), 0); // the provider that missed the SLA earns nothing
-        assertEq(usdc.balanceOf(treasury), 5); // no fee leg; the gas fee SNAPSHOT, never the live 999
-        assertEq(usdc.balanceOf(address(this)), 0); // whoever lands a permissionless op is not a payee
-        assertEq(usdc.balanceOf(address(jr)), 0);
-        assertEq(jr.activeJobs(pid), 0);
     }
 
     function test_conservation_holds_with_a_fee_on_top_and_a_mid_flight_gas_fee_change() public {
         vm.prank(curation);
-        jr.setFees(1000, 5); // 10% on top, set BEFORE the post
-        bytes32 jobId = _refOrder(keccak256("fee-leg"));
-        uint256 clientBefore = usdc.balanceOf(client);
-        _claim(jobId);
-        uint256 locked = clientBefore - usdc.balanceOf(client);
-        assertEq(locked, 236); // cap 210 + feeCap 21 + gasFeeSnap 5
+        jr.setFees(1000, 5, 0); // 10% on top, set BEFORE the claim
+        bytes32 jobId = _claim(_refC(keccak256("fee-leg")));
+        uint256 locked = START - jr.balanceOf(client);
+        assertEq(locked, 236); // cap 210 + feeCap 21 + gasFee 5
         vm.prank(curation);
-        jr.setFees(1000, 999); // the gas fee moves; the snapshot holds
-        uint256 clientAfterClaim = usdc.balanceOf(client);
+        jr.setFees(1000, 999, 0); // the gas fee moves; the claimed one holds
+        uint256 afterClaim = jr.balanceOf(client);
         _settle(opPk, jobId, 1500, bytes("r"));
         // charge = 165 ; fee = 165*1000/10000 = 16
-        assertEq(usdc.balanceOf(op), 165);
-        assertEq(usdc.balanceOf(treasury), 21); // fee 16 + gasFeeSnap 5, never the live 999
-        assertEq(usdc.balanceOf(client) - clientAfterClaim, 50); // 45 + (21 - 16)
+        assertEq(jr.earned(pid), 165);
+        assertEq(jr.accrued(), 16); // fee 16
+        assertEq(jr.relayerEarned(address(this)), 5); // the claimed 5, never the live 999
+        assertEq(jr.balanceOf(client) - afterClaim, 50); // 45 + (21 - 16)
         assertEq(165 + 21 + 50, locked);
-        assertEq(usdc.balanceOf(address(jr)), 0);
-        assertEq(jr.activeJobs(pid), 0);
+        _assertConserved(0, "after settle");
     }
 
-    function test_every_penalty_path_applies_reputation_before_the_untrusted_transfer() public {
-        // R25, for all three paths that move reputation. `ProviderRegistry.effectiveCap` reads
-        // reputation, so a reentrant payment token must never observe pre-penalty capacity — one
-        // extra claimable slot at the boundary. The ordering is observable: `jr2` is not `reg`'s
-        // registered JobRegistry, so its reputation call answers NotJobRegistry, while the token
-        // refuses every payout by returning false. Exactly one of the two can be the revert, so the
-        // answer pins the order: reputation-first ⇒ NotJobRegistry, transfer-first ⇒ TransferFailed.
-        FalseTransferToken bad = new FalseTransferToken();
-        JobRegistry jr2 = new JobRegistry(reg, IUSDC(address(bad)), curation, treasury);
-        vm.prank(curation);
-        jr2.setFees(100, 5); // the suite's own fees: three locks of 217, inside the 1000 minted below
-        bad.mint(client, 1000);
-        bytes32 s = _claimOn(jr2, address(bad), keccak256("r25-settle"));
-        bytes32 f = _claimOn(jr2, address(bad), keccak256("r25-fail"));
-        bytes32 r = _claimOn(jr2, address(bad), keccak256("r25-reclaim"));
-
-        uint64 t = uint64(block.timestamp);
-        bytes memory settleSig = OpSig.signSettle(vm, opPk, jr2, s, OpSig.usage(100), t);
-        vm.expectRevert(ProviderRegistry.NotJobRegistry.selector);
-        jr2.submitAndSettle(s, OpSig.usage(100), bytes("r"), t, settleSig); // the +5 reward
-
-        vm.warp(block.timestamp + 301); // past FAIL_GRACE, so the abort actually prices
-        uint64 tFail = uint64(block.timestamp);
-        bytes memory failSig = OpSig.signFail(vm, opPk, jr2, f, tFail);
-        vm.expectRevert(ProviderRegistry.NotJobRegistry.selector);
-        jr2.fail(f, tFail, failSig); // the -40 penalty
-
-        vm.warp(block.timestamp + 3601); // past the SLA
-        vm.expectRevert(ProviderRegistry.NotJobRegistry.selector);
-        jr2.reclaim(r); // the -40 penalty again, on the unsigned path
-    }
-
-    /// @notice The deploy-order hazard this suite's whole identity rests on NOT happening: a
-    /// `ProviderRegistry` whose `setJobRegistry` was pointed at some OTHER address. Escrow still
-    /// FUNDS at claim — nothing on that path writes to the registry — but every path that RESOLVES
-    /// it and PRICES the outcome goes through `applyReputationDelta`, which is `onlyJobRegistry`:
-    /// `submitAndSettle`, and any refund carrying `penalise: true` (`reclaim` always, `fail` past
-    /// `FAIL_GRACE`). Inside `FAIL_GRACE` one exit survives, the unpenalised `fail`; past it the
-    /// lock is stranded until curation authorises the right registry. Neither contract has a
-    /// sweep, an admin withdrawal or an owner path, so that authorisation is the only way out —
-    /// "resolves exactly once" is a property of a CORRECTLY WIRED pair and of nothing else.
-    /// `setJobRegistry` is a repeatable, revocable boolean map (`isJobRegistry`) — see
-    /// ProviderRegistry.sol:101. Revocation and mis-authorisation both strand escrow;
-    /// re-authorisation repairs either.
-    /// @dev Distinct from `test_every_penalty_path_applies_reputation_before_the_untrusted_transfer`
-    /// above: that one mis-wires in order to observe ORDERING inside a payout that reverts anyway,
-    /// under a token that refuses every transfer. This one runs the real token, so the stranded
-    /// balance is observable, and it pins the STRANDING and its repair rather than the ordering.
+    /// @notice The deploy-order hazard: a `ProviderRegistry` whose `setJobRegistry` points at some
+    /// OTHER address. Claim still lands — it writes nothing to the registry — but every exit that
+    /// prices the outcome goes through `applyReputationDelta`, which is `onlyJobRegistry`:
+    /// `submitAndSettle`, `reclaim` always, and `fail` past `FAIL_GRACE`. Inside `FAIL_GRACE` the
+    /// unpenalised `fail` is the one way out; past it the lock is stranded until curation authorises
+    /// the right registry, which then repairs it.
     function test_a_misdirected_setJobRegistry_strands_the_lock_until_curation_repairs_it() public {
         ProviderRegistry reg2 = new ProviderRegistry(curation);
         JobRegistry jr2 = new JobRegistry(reg2, IUSDC(address(usdc)), curation, treasury);
         vm.startPrank(curation);
-        // the fat-finger: some other live JobRegistry — a previous deployment's — not this pair's own
-        reg2.setJobRegistry(address(jr), true);
-        reg2.registerModel("model-a:fp8"); // modelId 1
+        reg2.setJobRegistry(address(jr), true); // the fat-finger: another live JobRegistry
+        reg2.registerModel("model-a:fp8");
         uint32 pid2 = reg2.register(op, 16, true, 1000); // capacityRequested 0 ⇒ effectiveCap floors at 1
-        jr2.setFees(100, 5); // the same 210 + 2 + 5 lock every other test here asserts
+        jr2.setFees(100, 5, 0);
         vm.stopPrank();
+        _deposit(jr2, 1000);
 
-        // Inside grace the pair still works end to end: post, claim, and the ONE exit that never
-        // touches the registry — `fail` with `penalise: false`. This half is also what proves the
-        // reverts below are the mis-wiring, and not a second fixture that was simply born broken.
-        uint256 clientStart = usdc.balanceOf(client);
-        bytes32 escapable = _claimOn(jr2, address(usdc), keccak256("miswired-in-grace"));
-        assertEq(usdc.balanceOf(address(jr2)), 217);
+        bytes32 escapable = _claimOn(jr2, _refC(keccak256("miswired-in-grace")));
+        assertEq(jr2.balanceOf(client), 1000 - 217);
         uint64 tf = uint64(block.timestamp);
-        jr2.fail(escapable, tf, OpSig.signFail(vm, opPk, jr2, escapable, tf));
-        assertEq(usdc.balanceOf(address(jr2)), 0);
-        assertEq(usdc.balanceOf(client), clientStart - 5); // cap + feeCap came back; the gas fee did not
-        assertEq(jr2.activeJobs(pid2), 0); // and the slot with it, so the next claim fits a cap of 1
+        jr2.fail(escapable, termsOf[escapable], tf, OpSig.signFail(vm, opPk, jr2, escapable, tf));
+        assertEq(jr2.balanceOf(client), 1000 - 5); // cap + feeCap came back; the gas fee did not
+        assertEq(jr2.activeJobs(pid2), 0);
 
-        // The same pair, one job later, is a trap.
         uint64 t0 = uint64(block.timestamp);
-        bytes32 stuck = _claimOn(jr2, address(usdc), keccak256("miswired-past-grace"));
-        assertEq(usdc.balanceOf(address(jr2)), 217); // claim funded it: no registry write on that path
+        bytes32 stuck = _claimOn(jr2, _refC(keccak256("miswired-past-grace")));
+        Terms memory terms = termsOf[stuck];
 
-        // settle never had a chance — the +5 reward is a registry write, grace or no grace
         bytes memory settleSig = OpSig.signSettle(vm, opPk, jr2, stuck, OpSig.usage(100), t0);
         vm.expectRevert(ProviderRegistry.NotJobRegistry.selector);
-        jr2.submitAndSettle(stuck, OpSig.usage(100), bytes("r"), t0, settleSig);
+        jr2.submitAndSettle(stuck, terms, OpSig.usage(100), bytes("r"), t0, settleSig);
 
         vm.warp(t0 + 301); // past FAIL_GRACE, so the abort prices the miss and therefore writes
         uint64 tg = uint64(block.timestamp);
         bytes memory failSig = OpSig.signFail(vm, opPk, jr2, stuck, tg);
         vm.expectRevert(ProviderRegistry.NotJobRegistry.selector);
-        jr2.fail(stuck, tg, failSig); // the one escape hatch has closed behind this job
+        jr2.fail(stuck, terms, tg, failSig);
 
         vm.expectRevert(JobRegistry.SlaNotExpired.selector);
-        jr2.reclaim(stuck); // and the client's exit has not opened yet
+        jr2.reclaim(stuck, terms);
         vm.warp(t0 + 3601);
         vm.expectRevert(ProviderRegistry.NotJobRegistry.selector);
-        jr2.reclaim(stuck); // when it does, it lands on that very same -40
+        jr2.reclaim(stuck, terms);
 
-        // the owner's own exit was never open on a Claimed row
         uint64 tc = uint64(block.timestamp);
+        bytes32 c = keccak256("miswired-past-grace");
         bytes memory cancelSig = OpSig.signCancel(vm, clientPk, jr2, stuck, tc);
         vm.expectRevert(JobRegistry.NotCancellable.selector);
-        jr2.cancel(stuck, tc, cancelSig);
+        jr2.cancel(client, c, tc, cancelSig);
 
-        assertEq(usdc.balanceOf(address(jr2)), 217); // stranded: no reachable transition out
-        assertEq(jr2.getJob(stuck).state, 1); // still Claimed
-        assertEq(jr2.activeJobs(pid2), 1); // the provider's capacity slot is stranded alongside it
+        assertEq(jr2.balanceOf(client), 1000 - 5 - 217); // stranded: no reachable transition out
+        assertEq(jr2.getJob(stuck).state, 1);
+        assertEq(jr2.activeJobs(pid2), 1);
 
-        // And this is where the allowlist earns itself. Under a write-once pointer the paragraph
-        // above was the end of the story — the lock was unresolvable forever. Curation can now
-        // authorize the registry that should have been wired, and the transition that was
-        // unreachable a moment ago lands on the very same job.
         vm.prank(curation);
         reg2.setJobRegistry(address(jr2), true);
-
-        jr2.reclaim(stuck);
-
-        assertEq(usdc.balanceOf(address(jr2)), 0, "the stranded lock resolved");
-        // two exits on this pair, the in-grace fail above and this reclaim, each kept its 5-unit gas fee
-        assertEq(usdc.balanceOf(client), clientStart - 10, "and cap + feeCap went back to the client");
-        assertEq(usdc.balanceOf(treasury), 10, "and the gas fees to the treasury");
-        assertEq(jr2.getJob(stuck).state, 3); // Cancelled — reclaim's terminal
-        assertEq(jr2.activeJobs(pid2), 0); // the capacity slot came back with it
+        jr2.reclaim(stuck, terms);
+        assertEq(jr2.balanceOf(client), 1000 - 10, "cap + feeCap went back to the client");
+        assertEq(jr2.relayerEarned(address(this)), 10, "and both gas fees to the relayer");
+        assertEq(jr2.accrued(), 0);
+        assertEq(jr2.getJob(stuck).state, 3);
+        assertEq(jr2.activeJobs(pid2), 0);
     }
 
-    /// @dev the reference order under a fresh commitment, so one test can fund several locks.
-    /// `postJob` derives its `c` from `designated` and therefore gives only one job per value.
-    /// The amount is the claim-time pull at the fees live NOW, so the one test that raises `feeBps`
-    /// before posting signs its fee ceiling too.
-    function _refOrder(bytes32 c) private returns (bytes32) {
-        uint256 amount = REF_CAP + REF_CAP * uint256(jr.feeBps()) / 10000 + uint256(jr.gasFee());
-        return postJobWith(c, REF_RATE_IN, REF_UNITS_IN, REF_RATE_OUT, REF_UNITS_OUT, amount);
+    /// @dev returns what the relayer — this contract — was paid, so the supply check can count it
+    function _payOutEverything() private returns (uint256 relayerPaid) {
+        if (jr.earned(pid) > 0) jr.payProvider(pid);
+        if (jr.accrued() > 0) jr.payTreasury();
+        relayerPaid = jr.relayerEarned(address(this));
+        if (relayerPaid > 0) jr.payRelayer(address(this));
+        uint128 left = jr.balanceOf(client);
+        if (left > 0) {
+            uint64 t = uint64(block.timestamp);
+            jr.withdraw(client, left, t, OpSig.signWithdraw(vm, clientPk, jr, left, t));
+        }
+    }
+}
+
+/// @notice Random sequences of every op, against the conservation identity.
+contract LedgerInvariantTest is JobHarness {
+    LedgerHandler internal handler;
+
+    function _fees() internal override {
+        vm.prank(curation);
+        jr.setFees(250, 5, 3);
     }
 
-    /// @dev post + claim against a foreign registry instance, in its own frame for the R19 stack
-    /// wall. `_postTo` reads the TARGET's own fees, so each caller's `setFees` is what the
-    /// authorization signs: `REF_CAP` plus that instance's fee ceiling plus its gas fee.
-    function _claimOn(JobRegistry target, address payToken, bytes32 c) private returns (bytes32 jobId) {
-        jobId = _postTo(target, payToken, c);
+    function setUp() public override {
+        super.setUp();
+        // the harness's own deposit was relayed by this contract, so it is one of the relayers
+        handler = new LedgerHandler(jr, reg, clientPk, opPk, pid, address(this));
+        targetContract(address(handler));
+    }
+
+    /// forge-config: default.invariant.runs = 10
+    /// forge-config: default.invariant.depth = 20
+    /// forge-config: default.invariant.fail-on-revert = true
+    function invariant_usdc_held_equals_balances_plus_locks_plus_earned_plus_accrued() public view {
+        uint256 relayed;
+        for (uint256 i; i < 3; i++) {
+            relayed += jr.relayerEarned(handler.relayers(i));
+        }
+        assertEq(
+            usdc.balanceOf(address(jr)),
+            uint256(jr.balanceOf(client)) + handler.liveLocks() + jr.earned(pid) + relayed + jr.accrued()
+        );
+        assertEq(jr.activeJobs(pid), handler.liveCount());
+    }
+}
+
+contract LedgerHandler is Test {
+    address internal constant USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
+
+    JobRegistry internal jr;
+    ProviderRegistry internal reg;
+    uint256 internal clientPk;
+    uint256 internal opPk;
+    uint32 internal pid;
+    address internal client;
+
+    uint256 internal seq;
+    uint64 internal lastWithdraw;
+    uint256 public liveLocks;
+    bytes32[] internal live;
+    mapping(bytes32 => Terms) internal termsOf;
+    mapping(bytes32 => uint256) internal lockOf;
+    /// @dev every sender a deposit or claim lands from: the suite, this handler, and an outsider
+    address[3] public relayers;
+
+    constructor(JobRegistry jr_, ProviderRegistry reg_, uint256 clientPk_, uint256 opPk_, uint32 pid_, address suite) {
+        jr = jr_;
+        reg = reg_;
+        clientPk = clientPk_;
+        opPk = opPk_;
+        pid = pid_;
+        client = vm.addr(clientPk_);
+        relayers = [suite, address(this), makeAddr("outside-relayer")];
+    }
+
+    function liveCount() external view returns (uint256) {
+        return live.length;
+    }
+
+    function deposit(uint256 value, uint8 who) external {
+        value = bound(value, jr.depositFee() + 1, 1_000e6);
+        uint256 validBefore = block.timestamp + 3600;
+        bytes32 nonce = keccak256(abi.encode("handler-deposit", ++seq));
+        bytes memory sig = AuthSig.signDeposit(vm, clientPk, USDC, address(jr), value, validBefore, nonce);
+        vm.prank(relayers[who % 3]);
+        jr.deposit(client, value, validBefore, nonce, sig);
+    }
+
+    function claim(uint32 unitsOut, uint128 rateOut, uint8 who) external {
+        if (live.length >= reg.effectiveCap(pid)) return;
+        Order memory o = Order({
+            c: keccak256(abi.encode("handler-order", ++seq)),
+            modelId: 1,
+            slaSecs: 3600,
+            rateIn: 30_000,
+            rateOut: uint128(bound(rateOut, 0, 1e6)),
+            unitsIn: 1000,
+            unitsOut: uint32(bound(unitsOut, 0, 100_000)),
+            designated: 0,
+            expiresAt: uint64(block.timestamp + 3600),
+            taskCid: bytes("bafy-handler")
+        });
+        uint256 raw = uint256(o.rateIn) * o.unitsIn + uint256(o.rateOut) * o.unitsOut;
+        uint256 cap = (raw + 999_999) / 1_000_000;
+        if (cap == 0) cap = 1;
+        uint256 lock = cap + cap * jr.feeBps() / 10000 + jr.gasFee();
+        if (lock > jr.balanceOf(client)) return;
+        bytes32 jobId = keccak256(abi.encodePacked(client, o.c));
         uint64 t = uint64(block.timestamp);
-        target.claim(jobId, t, OpSig.signClaim(vm, opPk, target, jobId, t));
+        address relayer = relayers[who % 3];
+        Terms memory terms = Terms(client, o.rateIn, o.rateOut, o.unitsIn, o.unitsOut, o.slaSecs, jr.gasFee(), relayer);
+        bytes memory orderSig = OrderSig.signOrder(vm, clientPk, jr, o);
+        bytes memory claimSig = OpSig.signClaim(vm, opPk, jr, jobId, t);
+        vm.prank(relayer);
+        jr.claim(o, client, orderSig, t, claimSig);
+        termsOf[jobId] = terms;
+        lockOf[jobId] = lock;
+        liveLocks += lock;
+        live.push(jobId);
+    }
+
+    function settle(uint256 idx, uint32 promptTok, uint32 cachedTok, uint32 completionTok) external {
+        if (live.length == 0) return;
+        bytes32 jobId = live[idx % live.length];
+        if (block.timestamp > uint256(jr.getJob(jobId).claimedAt) + 3600) return; // past its SLA
+        Usage memory u = Usage(promptTok, cachedTok, completionTok, uint128(bound(promptTok, 0, 40_000)));
+        uint64 t = uint64(block.timestamp);
+        jr.submitAndSettle(jobId, termsOf[jobId], u, bytes("r"), t, OpSig.signSettle(vm, opPk, jr, jobId, u, t));
+        _resolve(idx % live.length);
+    }
+
+    function fail(uint256 idx) external {
+        if (live.length == 0) return;
+        bytes32 jobId = live[idx % live.length];
+        uint64 t = uint64(block.timestamp);
+        jr.fail(jobId, termsOf[jobId], t, OpSig.signFail(vm, opPk, jr, jobId, t));
+        _resolve(idx % live.length);
+    }
+
+    function reclaim(uint256 idx) external {
+        if (live.length == 0) return;
+        bytes32 jobId = live[idx % live.length];
+        uint256 deadline = uint256(jr.getJob(jobId).claimedAt) + 3600;
+        if (block.timestamp <= deadline) vm.warp(deadline + 1);
+        jr.reclaim(jobId, termsOf[jobId]);
+        _resolve(idx % live.length);
+    }
+
+    function cancel() external {
+        bytes32 c = keccak256(abi.encode("handler-cancel", ++seq));
+        uint64 t = uint64(block.timestamp);
+        jr.cancel(client, c, t, OpSig.signCancel(vm, clientPk, jr, keccak256(abi.encodePacked(client, c)), t));
+    }
+
+    function withdraw(uint128 amount) external {
+        uint128 bal = jr.balanceOf(client);
+        amount = uint128(bound(amount, 0, bal));
+        if (block.timestamp <= lastWithdraw) vm.warp(lastWithdraw + 1);
+        uint64 t = uint64(block.timestamp);
+        jr.withdraw(client, amount, t, OpSig.signWithdraw(vm, clientPk, jr, amount, t));
+        lastWithdraw = t;
+    }
+
+    function payProvider() external {
+        if (jr.earned(pid) == 0) return;
+        jr.payProvider(pid);
+    }
+
+    function payTreasury() external {
+        if (jr.accrued() == 0) return;
+        jr.payTreasury();
+    }
+
+    function payRelayer(uint8 who) external {
+        address relayer = relayers[who % 3];
+        if (jr.relayerEarned(relayer) == 0) return;
+        jr.payRelayer(relayer);
+    }
+
+    function warp(uint16 secs) external {
+        vm.warp(block.timestamp + secs);
+    }
+
+    function _resolve(uint256 i) private {
+        bytes32 jobId = live[i];
+        liveLocks -= lockOf[jobId];
+        live[i] = live[live.length - 1];
+        live.pop();
     }
 }

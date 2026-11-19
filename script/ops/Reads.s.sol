@@ -32,6 +32,7 @@ contract Reads is OpsBase {
         console2.log("fees");
         console2.log("  feeBps          ", uint256(jr.feeBps()));
         console2.log("  gasFee          ", uint256(jr.gasFee()));
+        console2.log("  depositFee      ", uint256(jr.depositFee()));
         console2.log("constants");
         console2.log("  MAX_EXPIRY      ", uint256(jr.MAX_EXPIRY()));
         console2.log("  FAIL_GRACE      ", uint256(jr.FAIL_GRACE()));
@@ -61,7 +62,9 @@ contract Reads is OpsBase {
         _printAllowedModels(id);
     }
 
-    /// @notice One job. An absent job reads `found: false`; it is not an error.
+    /// @notice One job's row: status, claimant and claim time. An id with no row — an order never
+    /// claimed, or no order at all — reads `found: false`; it is not an error. The order's terms are
+    /// in its `Posted` event and the delivered counts in `Settled`.
     function job(bytes32 jobId) external {
         _load();
         JobView memory v = jr.getJob(jobId);
@@ -71,31 +74,22 @@ contract Reads is OpsBase {
         // the id the record carries, not the one that was asked for: a mismatch is a chain bug and
         // echoing the input would be exactly the way to never see it
         console2.log("  jobId (record)", vm.toString(v.jobId));
-        console2.log("  owner        ", v.owner);
         console2.log("  state        ", string.concat(vm.toString(uint256(v.state)), " (", _stateMeaning(v.state), ")"));
         console2.log(
             "  endedBecause ",
             string.concat(vm.toString(uint256(v.endedBecause)), " (", _endedMeaning(v.endedBecause), ")")
         );
         console2.log("  providerId   ", uint256(v.providerId));
-        console2.log("  designated   ", uint256(v.designated));
-        console2.log("  modelId      ", uint256(v.modelId));
-        console2.log("  rateIn/Out   ", string.concat(vm.toString(v.rateIn), " / ", vm.toString(v.rateOut)));
-        console2.log("  unitsIn/Out  ", string.concat(vm.toString(v.unitsIn), " / ", vm.toString(v.unitsOut)));
-        console2.log("  completionTok", uint256(v.completionTok));
-        console2.log("  promptTok    ", uint256(v.promptTok));
-        console2.log("  cachedTok    ", uint256(v.cachedTok));
-        console2.log("  rateInCached ", uint256(v.rateInCached));
-        console2.log("  slaSecs      ", uint256(v.slaSecs));
-        console2.log("  expiresAt    ", uint256(v.expiresAt));
         console2.log("  claimedAt    ", uint256(v.claimedAt));
-        console2.log("  gasFee       ", uint256(v.gasFee));
-        console2.log("  c            ", vm.toString(v.c));
-        // `bytes` that is ASCII in practice — print both, because the wire value is the bytes
-        console2.log("  taskCid hex  ", vm.toString(v.taskCid));
-        console2.log("  taskCid utf8 ", string(v.taskCid));
-        console2.log("  resultCid hex", vm.toString(v.resultCid));
-        console2.log("  resultCid utf8", string(v.resultCid));
+    }
+
+    /// @notice What one relayer has earned and not been paid: the gas fees of the jobs it claimed
+    /// and the fees of the deposits it landed. `payRelayer(relayer)` pays it to that same address;
+    /// anyone may call it. Pass the coordinator's relayer address.
+    function relayer(address relayer_) external {
+        _load();
+        console2.log("relayer", relayer_);
+        console2.log("  relayerEarned (unpaid)", uint256(jr.relayerEarned(relayer_)));
     }
 
     /// @notice The published quote for one (provider, model, sla) triple. Zeroes mean "no quote".
@@ -141,8 +135,8 @@ contract Reads is OpsBase {
 
         require(
             jr.treasury() != address(0),
-            "doctor: treasury is the zero address, so protocol fees would be burned on every "
-            "settlement. Curation must call jobRegistry.setTreasury(<treasury>) before any job settles."
+            "doctor: treasury is the zero address, so payTreasury cannot pay out the accrued fees. "
+            "Curation must call jobRegistry.setTreasury(<treasury>)."
         );
         console2.log("  treasury                  ", jr.treasury());
         require(
@@ -152,14 +146,15 @@ contract Reads is OpsBase {
             "jobRegistry.setFees(<bps <= 1000>, gasFee) to bring it back in range."
         );
         console2.log("  feeBps                    ", uint256(jr.feeBps()));
+        _printUnpaid();
 
         // Both of the following are setter-mutable, readable without a transaction, and each one
-        // alone makes `post` revert for every order — a deployment that is up, wired, and unusable.
+        // alone makes `claim` revert for every order — a deployment that is up, wired, and unusable.
         bool anySla = _anySlaAllowed();
         console2.log("  an SLA is allowed         ", _yesNo(anySla));
         require(
             anySla,
-            "doctor: no SLA among the probed common values is allowed, so post() reverts "
+            "doctor: no SLA among the probed common values is allowed, so claim() reverts "
             "SlaNotAllowed for every order using one (allowedSla is a bare mapping, so a value "
             "outside the probe could still be open). Curation must call " "jobRegistry.setSlaAllowed(3600, true)."
         );
@@ -168,12 +163,28 @@ contract Reads is OpsBase {
         console2.log("  a model is enabled        ", _yesNo(anyModel));
         require(
             anyModel,
-            "doctor: no model in the catalog is enabled (or the catalog is empty), so post() "
+            "doctor: no model in the catalog is enabled (or the catalog is empty), so claim() "
             "reverts ModelDisabled for every order. Curation must call "
             "providerRegistry.registerModel(<name>) and/or setModelEnabled(<modelId>, true)."
         );
 
         console2.log("  all checks passed");
+    }
+
+    /// @dev What the ledger owes and has not paid out yet: the treasury's accrued fees and each
+    /// provider id's earnings. `payTreasury` and `payProvider(id)` pay them; anyone may call either.
+    /// Relayer earnings are keyed by address and cannot be enumerated: `relayer(address)` reads one.
+    function _printUnpaid() private view {
+        console2.log("  accrued (treasury, unpaid)", uint256(jr.accrued()));
+        uint32 next = reg.nextProviderId();
+        uint256 total;
+        for (uint32 id = 1; id < next; id++) {
+            uint128 e = jr.earned(id);
+            if (e == 0) continue;
+            console2.log(string.concat("  earned (provider ", vm.toString(uint256(id)), ", unpaid)"), uint256(e));
+            total += e;
+        }
+        console2.log("  earned (all providers)    ", total);
     }
 
     /// @dev Private on purpose: this is the `provider()` rendering, and the only other caller that
@@ -196,7 +207,7 @@ contract Reads is OpsBase {
             return;
         }
         // the flag is off, so `modelAllowed` is the explicit half alone and this loop is complete:
-        // an explicit entry for an unregistered id cannot matter, `post` rejects it as ModelDisabled
+        // an explicit entry for an unregistered id cannot matter, `claim` rejects it as UnknownModel
         console2.log("    explicitly allowed (complete: 1..nextModelId-1 at the current epoch)");
         uint32 next = reg.nextModelId();
         bool any;
@@ -251,9 +262,9 @@ contract Reads is OpsBase {
     }
 
     /// @dev `src/Types.sol` defines both job vocabularies; a bare integer here is an invitation to
-    /// misread one. `ENDED_EXPIRED` especially: it is computed by `getJob`, never stored.
+    /// misread one. `ENDED_EXPIRED` especially: it is an off-chain reading, never on a row.
     function _stateMeaning(uint8 state) private pure returns (string memory) {
-        if (state == uint8(JobState.Open)) return "Open";
+        if (state == uint8(JobState.Open)) return "Open - no row";
         if (state == uint8(JobState.Claimed)) return "Claimed";
         if (state == uint8(JobState.Settled)) return "Settled";
         if (state == uint8(JobState.Cancelled)) return "Cancelled";
@@ -266,7 +277,7 @@ contract Reads is OpsBase {
         if (ended == ENDED_CANCELLED) return "ENDED_CANCELLED";
         if (ended == ENDED_PROVIDER_FAIL) return "ENDED_PROVIDER_FAIL";
         if (ended == ENDED_RECLAIM) return "ENDED_RECLAIM";
-        if (ended == ENDED_EXPIRED) return "ENDED_EXPIRED - view only, computed and never stored";
+        if (ended == ENDED_EXPIRED) return "ENDED_EXPIRED - off chain only, never on a row";
         return "UNKNOWN - not an EndedBecause this build defines";
     }
 

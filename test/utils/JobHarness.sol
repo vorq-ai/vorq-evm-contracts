@@ -11,9 +11,9 @@ import {OpSig} from "./OpSig.sol";
 import {RegSig} from "./RegSig.sol";
 
 /// @notice The one funded end-to-end fixture for every job-lifecycle suite: the real USDC on a
-/// pinned Base Sepolia fork, a client holding a balance and nothing else, one registered+listed
-/// provider at full reputation, and modelId 1 in the catalog. Suites inherit it and override
-/// `_fees()` only.
+/// pinned Base Sepolia fork, a client that deposited once into its prepaid balance, one
+/// registered+listed provider at full reputation, and modelId 1 in the catalog. Suites inherit it
+/// and override `_fees()` only.
 abstract contract JobHarness is BaseFork {
     JobRegistry internal jr;
     ProviderRegistry internal reg;
@@ -29,30 +29,32 @@ abstract contract JobHarness is BaseFork {
 
     /// @dev strictly-monotonic issuedAt for the registry's capacity op floor
     uint64 internal capNonce;
+    /// @dev a fresh EIP-3009 nonce per deposit: the token burns each one per owner
+    uint256 internal depositNonce;
 
-    // The reference order's rates live here and nowhere else, so `postJob`'s order and the
-    // authorization amount it signs cannot drift apart.
+    /// @dev the client's wallet before the deposit and the value it deposits once in `setUp`
+    uint256 internal constant WALLET = 1e24;
+    uint256 internal constant DEPOSIT = 1_000_000e6;
+    /// @dev the client's ledger balance right after that deposit, at the suite's own deposit fee
+    uint256 internal START;
+
+    /// @dev the terms each job was claimed under, keyed by jobId, so the exits can hand them back
+    mapping(bytes32 => Terms) internal termsOf;
+
+    // The reference order's rates live here and nowhere else.
     uint128 internal constant REF_RATE_IN = 30_000;
     uint128 internal constant REF_RATE_OUT = 90_000;
     uint32 internal constant REF_UNITS_IN = 1000;
     uint32 internal constant REF_UNITS_OUT = 2000;
     /// @dev cap = ceil((REF_RATE_IN*REF_UNITS_IN + REF_RATE_OUT*REF_UNITS_OUT) / RATE_SCALE)
-    /// = ceil((3e7 + 1.8e8) / 1e6) = 210. The CAP half of what the authorization signs is this
-    /// literal — never `capOf` or any number the contract DERIVED — so a wrong `cap` in `JobRegistry`
-    /// cannot hide behind a fixture that agreed with it, and every suite re-asserts
-    /// `capOf(jobId) == 210` against it after claiming. The gas-fee addend in `postJob` is the one
-    /// part read back off the contract (`jr.gasFee()`), which couples nothing: it is plain curation
-    /// config this fixture itself wrote through `_fees()`, not a computed quantity under test.
-    /// `postJob` additionally re-derives the ceiling inline to check this literal is not stale; that
-    /// arithmetic is spelled out locally rather than delegated to the contract, so it adds no
-    /// coupling. It omits `_atomicCharge`'s `max(1, ...)` floor, which cannot bind at these
-    /// rates — a `postJobWith` order priced below one atomic unit must pass its own amount.
+    /// = ceil((3e7 + 1.8e8) / 1e6) = 210. A literal, never a number the contract derived, so a wrong
+    /// cap in `JobRegistry` cannot hide behind a fixture that agrees with it. `_ref` re-derives it
+    /// inline to check the literal is not stale.
     uint256 internal constant REF_CAP = 210;
 
-    /// @notice Per-suite fee configuration. Called at the very END of `setUp`, so every
-    /// `postJob` after it snapshots the fees this suite wants into `Job.gasFeeSnap`.
-    /// Override as e.g. `vm.prank(curation); jr.setFees(500, 7);` — and nothing else: the
-    /// registry, the provider and the client's balance are already up.
+    /// @notice Per-suite fee configuration. Called near the END of `setUp`, before the client's one
+    /// deposit, so the deposit is taken at the suite's own `depositFee`. Override as e.g.
+    /// `vm.prank(curation); jr.setFees(500, 7, 0);` — and nothing else.
     function _fees() internal virtual {}
 
     function setUp() public virtual {
@@ -69,8 +71,10 @@ abstract contract JobHarness is BaseFork {
         vm.stopPrank();
         _requestCapacity(16);
         // no approval and no client transaction at all: the client only ever signs
-        deal(USDC, client, 1e24);
+        deal(USDC, client, WALLET);
         _fees();
+        _deposit(jr, DEPOSIT);
+        START = jr.balanceOf(client);
     }
 
     /// @notice Operator-signed capacity request, relayed by the test contract.
@@ -79,60 +83,53 @@ abstract contract JobHarness is BaseFork {
         reg.requestCapacity(n, t, RegSig.signCapacity(vm, opPk, reg, n, t));
     }
 
-    /// @notice The reference order every later suite reproduces: rateIn 30_000, rateOut 90_000,
-    /// unitsIn 1000, unitsOut 2000, slaSecs 3600 ⇒ cap = REF_CAP = 210.
-    /// The authorization covers the exact claim-time pull, `cap + cap*feeBps/10000 + gasFeeSnap`, so
-    /// it reads `feeBps`/`gasFee` at post time — which is why `_fees()` runs before any `postJob`.
-    /// `c` is derived from `designated`, so one `designated` value gives one job per suite;
-    /// `postJobWith` is the escape hatch for any other order shape.
-    function postJob(uint32 designated) internal returns (bytes32 jobId, Order memory o) {
-        // a rate edit that forgets REF_CAP would otherwise surface as an invalid-signature revert
-        // from inside `claim`, which reads as a signing bug; fail here instead, and say why. The ceiling
-        // is spelled out inline (not read from the contract), so this checks the literal against the
-        // rates above and nothing else. No `max(1, ...)` floor: it cannot bind at these rates.
+    // ── deposits ──────────────────────────────────────────────────────────────────────────────
+
+    /// @notice A client-signed deposit of `value` into `target`, relayed by the test contract.
+    function _deposit(JobRegistry target, uint256 value) internal {
+        (uint256 validBefore, bytes32 nonce, bytes memory sig) = _depositAuth(target, value);
+        target.deposit(client, value, validBefore, nonce, sig);
+    }
+
+    /// @notice R1 companion to `_deposit`: pre-sign, because AuthSig staticcalls the token.
+    function _depositAuth(JobRegistry target, uint256 value)
+        internal
+        returns (uint256 validBefore, bytes32 nonce, bytes memory sig)
+    {
+        validBefore = block.timestamp + 3600;
+        nonce = keccak256(abi.encode("deposit", ++depositNonce));
+        sig = AuthSig.signDeposit(vm, clientPk, USDC, address(target), value, validBefore, nonce);
+    }
+
+    // ── orders ────────────────────────────────────────────────────────────────────────────────
+
+    /// @notice The reference order every suite reproduces: rateIn 30_000, rateOut 90_000,
+    /// unitsIn 1000, unitsOut 2000, slaSecs 3600 ⇒ cap = REF_CAP = 210. `c` is derived from
+    /// `designated`, so one `designated` value gives one job per suite; `_refC` and `_orderWith`
+    /// are the escape hatches for any other order.
+    function _ref(uint32 designated) internal view returns (Order memory o) {
+        o = _refC(keccak256(abi.encode(designated, "c")));
+        o.designated = designated;
+    }
+
+    function _refC(bytes32 c) internal view returns (Order memory o) {
+        // a rate edit that forgets REF_CAP would otherwise surface far from its cause
         assertEq(
             REF_CAP,
             (uint256(REF_RATE_IN) * REF_UNITS_IN + uint256(REF_RATE_OUT) * REF_UNITS_OUT + 999_999) / 1_000_000,
             "JobHarness: REF_CAP is stale - update it alongside the reference rates"
         );
-        o = Order({
-            c: keccak256(abi.encode(designated, "c")),
-            modelId: 1,
-            slaSecs: 3600,
-            rateIn: REF_RATE_IN,
-            rateOut: REF_RATE_OUT,
-            unitsIn: REF_UNITS_IN,
-            unitsOut: REF_UNITS_OUT,
-            designated: designated,
-            expiresAt: uint64(block.timestamp + 3600),
-            taskCid: bytes("bafy-task")
-        });
-        jobId = keccak256(abi.encodePacked(client, o.c));
-        bytes memory authSig = AuthSig.signAuth(
-            vm,
-            clientPk,
-            USDC,
-            address(jr),
-            REF_CAP + REF_CAP * uint256(jr.feeBps()) / 10000 + uint256(jr.gasFee()),
-            jobId,
-            o.expiresAt
-        );
-        jr.post(o, client, OrderSig.signOrder(vm, clientPk, jr, o), authSig);
+        o = _orderWith(c, REF_RATE_IN, REF_UNITS_IN, REF_RATE_OUT, REF_UNITS_OUT);
+        o.taskCid = bytes("bafy-task");
     }
 
-    /// @notice An undesignated job with caller-chosen rates, units and authorization amount — the
-    /// escape hatch for cap arithmetic, dust orders, and any suite needing more than one open job.
-    /// `authAmount` stays explicit (never derived) so a suite can deliberately under-sign it:
-    /// it must equal `cap + cap*feeBps/10000 + gasFee-at-post` for the claim-time pull to succeed.
-    function postJobWith(
-        bytes32 c,
-        uint128 rateIn,
-        uint32 unitsIn,
-        uint128 rateOut,
-        uint32 unitsOut,
-        uint256 authAmount
-    ) internal returns (bytes32 jobId) {
-        Order memory o = Order({
+    /// @notice An undesignated order with caller-chosen rates and units.
+    function _orderWith(bytes32 c, uint128 rateIn, uint32 unitsIn, uint128 rateOut, uint32 unitsOut)
+        internal
+        view
+        returns (Order memory)
+    {
+        return Order({
             c: c,
             modelId: 1,
             slaSecs: 3600,
@@ -144,139 +141,120 @@ abstract contract JobHarness is BaseFork {
             expiresAt: uint64(block.timestamp + 3600),
             taskCid: bytes("bafy-raw")
         });
-        jobId = keccak256(abi.encodePacked(client, o.c));
-        jr.post(
-            o,
-            client,
-            OrderSig.signOrder(vm, clientPk, jr, o),
-            AuthSig.signAuth(vm, clientPk, USDC, address(jr), authAmount, jobId, o.expiresAt)
-        );
     }
 
-    /// @notice The reference order posted against an ARBITRARY registry/token pair — the fixture for
-    /// every test that has to stand up its own `JobRegistry` (a forced zero-signer record, a token
-    /// that returns false, a registry whose `jobRegistry` is somebody else). `postJob` cannot serve
-    /// those: it is hardwired to the harness's `jr` and `usdc`.
-    /// @dev Its own frame because the two signing calls plus the order overflow a test body's stack
-    /// (R19). `c` must be fresh across the whole test — the authorization's nonce is the jobId and
-    /// the token burns it per owner, not per payee, so two posts sharing a `c` collide even on two
-    /// different registries.
-    function _postTo(JobRegistry target, address payToken, bytes32 c) internal returns (bytes32 jobId) {
-        Order memory o = Order({
-            c: c,
-            modelId: 1,
-            slaSecs: 3600,
-            rateIn: REF_RATE_IN,
-            rateOut: REF_RATE_OUT,
-            unitsIn: REF_UNITS_IN,
-            unitsOut: REF_UNITS_OUT,
-            designated: 0,
-            expiresAt: uint64(block.timestamp + 3600),
-            taskCid: bytes("bafy-alt")
+    function _jobId(Order memory o) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked(client, o.c));
+    }
+
+    /// @notice The terms a claim of `o` by `client`, relayed by the test contract, would fix on
+    /// `target` right now.
+    function _termsFor(JobRegistry target, Order memory o) internal view returns (Terms memory) {
+        return _termsVia(target, o, address(this));
+    }
+
+    /// @notice `_termsFor` for a claim landed by `relayer`.
+    function _termsVia(JobRegistry target, Order memory o, address relayer) internal view returns (Terms memory) {
+        return Terms({
+            owner: client,
+            rateIn: o.rateIn,
+            rateOut: o.rateOut,
+            unitsIn: o.unitsIn,
+            unitsOut: o.unitsOut,
+            slaSecs: o.slaSecs,
+            gasFee: target.gasFee(),
+            relayer: relayer
         });
-        jobId = keccak256(abi.encodePacked(client, o.c));
-        target.post(
-            o, client, OrderSig.signOrder(vm, clientPk, target, o), _authFor(target, payToken, jobId, o.expiresAt)
-        );
     }
 
-    /// @dev `signAuth` is an internal library call, so its arguments land on the caller's stack; a
-    /// frame of its own is what keeps `_postTo` compiling (R19). The amount is
-    /// `REF_CAP + its fee ceiling + target.gasFee()`, read off the TARGET rather than off `jr`,
-    /// because every caller configures its own instance's fees inline and `_fees()` (which
-    /// configures `jr`) never reaches them. Where the authorization is actually SPENT — the settle,
-    /// fail, exit and invariant suites all claim through it — a stale literal would surface as an
-    /// invalid-signature revert from inside `claim`; where it is not (the claim suite's caller
-    /// expects `claim` to revert before the token is touched) reading the target is what keeps the
-    /// fixture honest if that test ever starts claiming for real.
-    /// `payToken` is the token whose domain signs. `FalseTransferToken` has none and validates
-    /// nothing, so it is handed bytes it will never read.
-    function _authFor(JobRegistry target, address payToken, bytes32 jobId, uint64 deadline)
-        internal
-        view
-        returns (bytes memory)
-    {
-        if (payToken != USDC) return hex"";
-        return AuthSig.signAuth(
-            vm,
-            clientPk,
-            payToken,
-            address(target),
-            REF_CAP + REF_CAP * uint256(target.feeBps()) / 10000 + uint256(target.gasFee()),
-            jobId,
-            deadline
-        );
+    /// @notice What claiming `o` locks out of the balance at the fees live now, spelled out locally.
+    function _lockOf(Order memory o) internal view returns (uint256) {
+        uint256 raw = uint256(o.rateIn) * o.unitsIn + uint256(o.rateOut) * o.unitsOut;
+        uint256 cap = (raw + 999_999) / 1_000_000;
+        if (cap == 0) cap = 1;
+        return cap + cap * uint256(jr.feeBps()) / 10000 + uint256(jr.gasFee());
     }
 
-    /// @notice Operator-signed claim at the current block time, submitted by the TEST contract —
-    /// never the operator key. `claim` reads no `msg.sender`; the signature is the whole authority.
-    function _claim(bytes32 jobId) internal {
+    // ── claim ─────────────────────────────────────────────────────────────────────────────────
+
+    /// @notice The client-signed order claimed by the operator at the current block time, submitted
+    /// by the TEST contract — never the operator key. `claim` authorises nothing by `msg.sender`; it
+    /// records the sender in the terms as the relayer that earns the gas fee.
+    function _claim(Order memory o) internal returns (bytes32 jobId) {
+        return _claimOn(jr, o);
+    }
+
+    function _claimOn(JobRegistry target, Order memory o) internal returns (bytes32 jobId) {
+        return _claimVia(target, o, address(this));
+    }
+
+    /// @notice `_claimOn` landed by `relayer`, recording the terms with that relayer in them.
+    function _claimVia(JobRegistry target, Order memory o, address relayer) internal returns (bytes32 jobId) {
+        jobId = _jobId(o);
         uint64 t = uint64(block.timestamp);
-        jr.claim(jobId, t, OpSig.signClaim(vm, opPk, jr, jobId, t));
+        Terms memory terms = _termsVia(target, o, relayer);
+        bytes memory orderSig = OrderSig.signOrder(vm, clientPk, target, o);
+        bytes memory sig = OpSig.signClaim(vm, opPk, target, jobId, t);
+        vm.prank(relayer);
+        target.claim(o, client, orderSig, t, sig);
+        termsOf[jobId] = terms;
     }
 
-    /// @notice R1 companion to `_claim`: a negative test must pre-sign, because OpSig's
-    /// `DOMAIN_SEPARATOR()`/`CLAIM_TYPEHASH()` staticcalls would eat an armed `expectRevert`.
-    /// Use as: `bytes memory sig = _claimSig(id); vm.expectRevert(...); jr.claim(id, t, sig);`
-    /// Tasks adding `_settle`/`_fail` should ship the same `_xSig`/`_x` pair.
-    function _claimSig(bytes32 jobId) internal view returns (bytes memory) {
-        return OpSig.signClaim(vm, opPk, jr, jobId, uint64(block.timestamp));
+    /// @notice R1 companion to `_claim`: a negative test must pre-sign, because the signing helpers'
+    /// staticcalls would eat an armed `expectRevert`.
+    /// Use as: `(bytes memory os, bytes memory cs) = _claimSigs(o); vm.expectRevert(...);
+    /// jr.claim(o, client, os, t, cs);`
+    function _claimSigs(Order memory o) internal view returns (bytes memory orderSig, bytes memory claimSig) {
+        orderSig = OrderSig.signOrder(vm, clientPk, jr, o);
+        claimSig = OpSig.signClaim(vm, opPk, jr, _jobId(o), uint64(block.timestamp));
     }
 
-    /// @notice Operator-signed settle at the current block time, submitted by the TEST contract —
-    /// which is therefore a gas-only relayer and must be paid nothing. `pk` is a parameter, not
-    /// `opPk`, because a rotated operator signs with a different key for the same provider id.
-    /// `resultCid` is still a submission argument — it is stored, emitted and required non-empty —
-    /// but it is NOT part of what `pk` signs, so this helper passes it only to `submitAndSettle`.
+    // ── exits ─────────────────────────────────────────────────────────────────────────────────
+
+    /// @notice Operator-signed settle at the current block time, submitted by the TEST contract.
+    /// `pk` is a parameter because a rotated operator signs with a different key for the same id.
+    /// `resultCid` is submitted, but it is NOT part of what `pk` signs.
     function _settle(uint256 pk, bytes32 jobId, uint32 completionTok, bytes memory resultCid) internal {
-        uint64 t = uint64(block.timestamp);
         _settleUsage(pk, jobId, OpSig.usage(completionTok), resultCid);
     }
 
-    /// @notice `_settle` with the backend's full usage: prompt, cached and completion counts and the
-    /// provider's cached rate.
+    /// @notice `_settle` with the backend's full usage.
     function _settleUsage(uint256 pk, bytes32 jobId, Usage memory u, bytes memory resultCid) internal {
         uint64 t = uint64(block.timestamp);
         bytes memory sig = OpSig.signSettle(vm, pk, jr, jobId, u, t);
-        jr.submitAndSettle(jobId, u, resultCid, t, sig);
+        jr.submitAndSettle(jobId, termsOf[jobId], u, resultCid, t, sig);
     }
 
-    /// @notice R1 companion to `_settle`, same contract as `_claimSig`: pre-sign on the line
-    /// BEFORE `vm.expectRevert`, or OpSig's staticcalls eat the armed cheatcode.
-    /// Takes no `resultCid` — the Settle struct has none, so the signature a negative test pre-signs
-    /// is valid for whatever CID the call then submits.
+    /// @notice R1 companion to `_settle`: pre-sign on the line BEFORE `vm.expectRevert`.
     function _settleSig(uint256 pk, bytes32 jobId, uint32 completionTok) internal view returns (bytes memory) {
         return OpSig.signSettle(vm, pk, jr, jobId, OpSig.usage(completionTok), uint64(block.timestamp));
     }
 
     /// @notice Operator-signed provider abort at the current block time, submitted by the TEST
-    /// contract — a gas-only relayer that must be paid nothing. `pk` is a parameter for the same
-    /// reason `_settle` takes one: the claimant's key is not the only one a negative test signs
-    /// with. `issuedAt` is the CURRENT time, so this helper never lands a pre-signed voucher — the
-    /// grace window prices at landing, and a test pinning that must sign explicitly via `OpSig`.
+    /// contract. `issuedAt` is the CURRENT time, so this never lands a pre-signed voucher.
     function _fail(uint256 pk, bytes32 jobId) internal {
         uint64 t = uint64(block.timestamp);
-        jr.fail(jobId, t, OpSig.signFail(vm, pk, jr, jobId, t));
+        jr.fail(jobId, termsOf[jobId], t, OpSig.signFail(vm, pk, jr, jobId, t));
     }
 
-    /// @notice R1 companion to `_fail`, same contract as `_claimSig`/`_settleSig`: pre-sign on the
-    /// line BEFORE `vm.expectRevert`, or OpSig's staticcalls eat the armed cheatcode.
+    /// @notice R1 companion to `_fail`.
     function _failSig(uint256 pk, bytes32 jobId) internal view returns (bytes memory) {
         return OpSig.signFail(vm, pk, jr, jobId, uint64(block.timestamp));
     }
 
-    /// @notice Owner-signed cancel at the current block time, submitted by the TEST contract. `pk`
-    /// is a parameter because `cancel` is the one op the CLIENT signs (`clientPk`), and a negative
-    /// test signs with a stranger's key for the same job. There is no `cancelFor` and no
-    /// `msg.sender` path: an owner submitting its own cancel is just relaying its own signature.
-    function _cancelAs(uint256 pk, bytes32 jobId) internal {
-        uint64 t = uint64(block.timestamp);
-        jr.cancel(jobId, t, OpSig.signCancel(vm, pk, jr, jobId, t));
+    function _reclaim(bytes32 jobId) internal {
+        jr.reclaim(jobId, termsOf[jobId]);
     }
 
-    /// @notice R1 companion to `_cancelAs`, same contract as the other `_xSig` helpers: pre-sign on
-    /// the line BEFORE `vm.expectRevert`, or OpSig's staticcalls eat the armed cheatcode.
-    function _cancelSig(uint256 pk, bytes32 jobId) internal view returns (bytes memory) {
-        return OpSig.signCancel(vm, pk, jr, jobId, uint64(block.timestamp));
+    /// @notice Owner-signed cancel of `client`'s order `c` at the current block time, signed with
+    /// `pk` (a negative test signs with a stranger's key) and submitted by the TEST contract.
+    function _cancelAs(uint256 pk, bytes32 c) internal {
+        uint64 t = uint64(block.timestamp);
+        jr.cancel(client, c, t, OpSig.signCancel(vm, pk, jr, keccak256(abi.encodePacked(client, c)), t));
+    }
+
+    /// @notice R1 companion to `_cancelAs`.
+    function _cancelSig(uint256 pk, bytes32 c) internal view returns (bytes memory) {
+        return OpSig.signCancel(vm, pk, jr, keccak256(abi.encodePacked(client, c)), uint64(block.timestamp));
     }
 }

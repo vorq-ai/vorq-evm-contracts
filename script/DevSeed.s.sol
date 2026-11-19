@@ -5,7 +5,7 @@ import {Script} from "forge-std/Script.sol";
 import {ProviderRegistry} from "../src/ProviderRegistry.sol";
 
 /// @notice Development stacks only (the fork bootstrap): curation's first transactions after
-/// `Deploy.s.sol`, sent from keys, so a job can be posted, claimed and settled immediately — the
+/// `Deploy.s.sol`, sent from keys, so a job can be claimed and settled immediately — the
 /// registries wired, one model, provider id 1 at full reputation with capacity, and the MOCK CVM
 /// image on the measurement allowlist. A real network sends the same calls from its curation Safe
 /// and never allowlists the mock image.
@@ -40,7 +40,7 @@ contract DevSeed is Script {
         vm.stopBroadcast();
 
         // The one wiring nothing else notices. Only `applyReputationDelta` reads the allowlist, so a
-        // miss leaves `post` and `claim` working and escrow funding normally, while `submitAndSettle`
+        // miss leaves `deposit` and `claim` working and locks taken normally, while `submitAndSettle`
         // and `reclaim` revert and `fail` succeeds only inside its 300 s grace window. The JobRegistry
         // cannot self-check at construction (each needs the other's address), so it is asserted on
         // the run that wires both. A real network runs `make doctor` for the same check.

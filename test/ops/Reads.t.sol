@@ -43,7 +43,7 @@ contract ReadsTest is OpsFixture {
 
     function test_configReadsLiveValues() public {
         vm.prank(curation);
-        jr.setFees(250, 7);
+        jr.setFees(250, 7, 9);
         reads.config(); // asserts by not reverting; the values are eyeballed under -vv
         assertEq(jr.feeBps(), 250);
     }
@@ -103,6 +103,12 @@ contract ReadsTest is OpsFixture {
         reads.provider(id);
     }
 
+    /// @dev a relayer that never landed anything reads zero, never a revert
+    function test_relayerReadsItsUnpaidEarnings() public {
+        reads.relayer(makeAddr("never-relayed"));
+        assertEq(jr.relayerEarned(makeAddr("never-relayed")), 0);
+    }
+
     /// @dev an absent job must read as `found: false`, never as a revert
     function test_absentJobIsFoundFalse() public {
         reads.job(keccak256("nope"));
@@ -133,7 +139,7 @@ contract ReadsTest is OpsFixture {
         vm.stopPrank();
         vm.expectRevert(
             bytes(
-                "doctor: no SLA among the probed common values is allowed, so post() reverts "
+                "doctor: no SLA among the probed common values is allowed, so claim() reverts "
                 "SlaNotAllowed for every order using one (allowedSla is a bare mapping, so a value "
                 "outside the probe could still be open). Curation must call " "jobRegistry.setSlaAllowed(3600, true)."
             )
@@ -146,7 +152,7 @@ contract ReadsTest is OpsFixture {
         reg.setModelEnabled(1, false);
         vm.expectRevert(
             bytes(
-                "doctor: no model in the catalog is enabled (or the catalog is empty), so post() "
+                "doctor: no model in the catalog is enabled (or the catalog is empty), so claim() "
                 "reverts ModelDisabled for every order. Curation must call "
                 "providerRegistry.registerModel(<name>) and/or setModelEnabled(<modelId>, true)."
             )
@@ -167,7 +173,7 @@ contract ReadsTest is OpsFixture {
         // if a different guard started catching this first
         vm.expectRevert(
             bytes(
-                "doctor: no model in the catalog is enabled (or the catalog is empty), so post() "
+                "doctor: no model in the catalog is enabled (or the catalog is empty), so claim() "
                 "reverts ModelDisabled for every order. Curation must call "
                 "providerRegistry.registerModel(<name>) and/or setModelEnabled(<modelId>, true)."
             )

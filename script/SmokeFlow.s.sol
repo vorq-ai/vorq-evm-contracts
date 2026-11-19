@@ -3,19 +3,19 @@ pragma solidity 0.8.30;
 
 import {Script} from "forge-std/Script.sol";
 import {JobRegistry} from "../src/JobRegistry.sol";
-import {JobState, Order} from "../src/Types.sol";
+import {JobState, Order, Terms} from "../src/Types.sol";
 // the signing recipe is shared with the test suite on purpose: the smoke's job is to prove that the
 // same EIP-712 and EIP-3009 spellings the unit tests exercise also land over a real RPC
 import {OpSig} from "../test/utils/OpSig.sol";
 import {OrderSig} from "../test/utils/OrderSig.sol";
 import {AuthSig} from "../test/utils/AuthSig.sol";
 
-/// @notice One post -> claim -> submitAndSettle round trip against a deployed stack. Only the
+/// @notice One deposit -> claim -> submitAndSettle round trip against a deployed stack. Only the
 /// JobRegistry address and the chain id come out of `out-addresses/addresses.json`; every other
 /// address and every price constant is read off the registry, so a stale file cannot change what the
-/// smoke signs. Every op is signed by its own actor (client: order + authorization; provider
-/// operator: claim + settle) and every transaction is sent by the relayer, so the client and
-/// provider keys never send anything.
+/// smoke signs. Every op is signed by its own actor (client: deposit authorization + order;
+/// provider operator: claim + settle) and every transaction is sent by the relayer, so the client
+/// and provider keys never send anything.
 contract SmokeFlow is Script {
     uint32 internal constant COMPLETION_TOK = 1500;
     bytes internal constant RESULT_CID = "bafy-smoke";
@@ -34,10 +34,11 @@ contract SmokeFlow is Script {
         require(address(jr).code.length > 0, "SmokeFlow: no code at the jobRegistry address - addresses.json is stale");
 
         Order memory order = _order();
-        bytes32 jobId = keccak256(abi.encodePacked(vm.addr(vm.envUint("CLIENT_PK")), order.c));
+        address owner = vm.addr(vm.envUint("CLIENT_PK"));
+        bytes32 jobId = keccak256(abi.encodePacked(owner, order.c));
 
-        _post(jr, order, jobId);
-        _claimAndSettle(jr, jobId);
+        _deposit(jr, order, owner);
+        _claimAndSettle(jr, order, owner, jobId);
 
         // This runs in the SIMULATION frame, like every other line of this body: `forge script`
         // executes `run()` once, sends the broadcast transactions afterwards, and never re-runs it.
@@ -49,7 +50,7 @@ contract SmokeFlow is Script {
 
     function _order() private view returns (Order memory) {
         return Order({
-            // fresh per run: jobId = keccak256(owner, c), so a reused `c` is permanently DuplicateJob
+            // fresh per run: jobId = keccak256(owner, c), so a reused `c` is permanently spent
             c: keccak256(abi.encodePacked("vorq-smoke", block.number, block.timestamp)),
             modelId: 1,
             slaSecs: 3600,
@@ -57,8 +58,7 @@ contract SmokeFlow is Script {
             rateOut: 90_000,
             unitsIn: 1000,
             unitsOut: 2000,
-            // the seeded provider, matching how a coordinator posts: designation is immutable after
-            // post and is what a provider's restart recovery dispatches on
+            // the seeded provider: designation is what a provider's restart recovery dispatches on
             designated: 1,
             // cast is lossless: a uint64 unix timestamp does not overflow until the year 2554
             expiresAt: uint64(block.timestamp + 3600),
@@ -66,41 +66,52 @@ contract SmokeFlow is Script {
         });
     }
 
-    function _post(JobRegistry jr, Order memory order, bytes32 jobId) private {
-        uint256 clientPk = vm.envUint("CLIENT_PK");
+    /// Tops the client's balance up by exactly what the claim will lock, plus the deposit fee.
+    function _deposit(JobRegistry jr, Order memory order, address owner) private {
         uint256 scale = jr.RATE_SCALE();
-        // the authorization must cover exactly what claim pulls: cap + the protocol fee's ceiling on
-        // top of it + the gas fee snapshotted at post, where
-        // cap = ceilDiv(rateIn*unitsIn + rateOut*unitsOut, RATE_SCALE) = 210 at these rates.
-        // No max(1, ...) floor — it cannot bind on a nonzero rate.
+        // cap = ceilDiv(rateIn*unitsIn + rateOut*unitsOut, RATE_SCALE) = 210 at these rates; the lock
+        // is cap + the protocol fee's ceiling on top of it + the gas fee. No max(1, ...) floor — it
+        // cannot bind on a nonzero rate.
         uint256 cap =
             (uint256(order.rateIn) * order.unitsIn + uint256(order.rateOut) * order.unitsOut + scale - 1) / scale;
-        uint256 amount = cap + cap * jr.feeBps() / 10000 + jr.gasFee();
+        uint256 value = cap + cap * jr.feeBps() / 10000 + jr.gasFee() + jr.depositFee();
+        uint256 validBefore = block.timestamp + 3600;
+        bytes32 nonce = keccak256(abi.encodePacked("vorq-smoke-deposit", order.c));
         // the token comes off the registry, never out of the json: the authorization is only
-        // executable against the token `claim` itself will call, and a mismatch would surface as an
-        // invalid-signature revert from deep inside claim rather than as a bad address here
-        bytes memory authSig =
-            AuthSig.signAuth(vm, clientPk, address(jr.usdc()), address(jr), amount, jobId, order.expiresAt);
-        bytes memory orderSig = OrderSig.signOrder(vm, clientPk, jr, order);
+        // executable against the token `deposit` itself will call
+        bytes memory authSig = AuthSig.signDeposit(
+            vm, vm.envUint("CLIENT_PK"), address(jr.usdc()), address(jr), value, validBefore, nonce
+        );
 
         vm.startBroadcast(vm.envUint("DEPLOYER_PK"));
-        jr.post(order, vm.addr(clientPk), orderSig, authSig);
+        jr.deposit(owner, value, validBefore, nonce, authSig);
         vm.stopBroadcast();
     }
 
-    function _claimAndSettle(JobRegistry jr, bytes32 jobId) private {
+    function _claimAndSettle(JobRegistry jr, Order memory order, address owner, bytes32 jobId) private {
         uint256 providerPk = vm.envUint("PROVIDER_PK");
         // cast is lossless: a uint64 unix timestamp does not overflow until the year 2554. Job ops
         // accept issuedAt within +-600 s of the block they land in, so a few blocks of relay lag is
         // well inside the window.
         uint64 issuedAt = uint64(block.timestamp);
+        bytes memory orderSig = OrderSig.signOrder(vm, vm.envUint("CLIENT_PK"), jr, order);
         bytes memory claimSig = OpSig.signClaim(vm, providerPk, jr, jobId, issuedAt);
         // RESULT_CID is submitted but not signed — it is not a member of the Settle struct
         bytes memory settleSig = OpSig.signSettle(vm, providerPk, jr, jobId, OpSig.usage(COMPLETION_TOK), issuedAt);
+        Terms memory terms = Terms(
+            owner,
+            order.rateIn,
+            order.rateOut,
+            order.unitsIn,
+            order.unitsOut,
+            order.slaSecs,
+            jr.gasFee(),
+            vm.addr(vm.envUint("DEPLOYER_PK")) // the claim's broadcaster is its relayer
+        );
 
         vm.startBroadcast(vm.envUint("DEPLOYER_PK"));
-        jr.claim(jobId, issuedAt, claimSig);
-        jr.submitAndSettle(jobId, OpSig.usage(COMPLETION_TOK), RESULT_CID, issuedAt, settleSig);
+        jr.claim(order, owner, orderSig, issuedAt, claimSig);
+        jr.submitAndSettle(jobId, terms, OpSig.usage(COMPLETION_TOK), RESULT_CID, issuedAt, settleSig);
         vm.stopBroadcast();
     }
 }

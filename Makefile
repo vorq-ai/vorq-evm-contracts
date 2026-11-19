@@ -44,7 +44,7 @@ need = $(if $($(1)),,$(error $(1) is required: make $@ $(1)=<value>))
 # `0x0x…` and a cryptic forge parse error instead of a usage line.
 no0x = $(if $(filter 0x%,$($(1))),$(error $(1) must be 64 lowercase hex with NO 0x prefix: make $@ $(1)=<digest>))
 
-.PHONY: help doctor read-config read-provider read-job read-asks read-allowlist \
+.PHONY: help doctor read-config read-provider read-job read-relayer read-asks read-allowlist \
         register setOperator setListed setCapacityCeiling setReputation \
         registerModel setModelEnabled setAllowedModels \
         setAllowlistEntry revokeAllowlistEntry \
@@ -64,7 +64,7 @@ help:
 	@grep -hE '^(# )?[a-zA-Z][a-zA-Z0-9_-]*:.*## ' "$(firstword $(MAKEFILE_LIST))" \
 	  | sed 's/^# //; s/:.*## /\t/' | expand -t28 | LC_ALL=C sort
 
-doctor: ## Check a deployment: wiring, separators, treasury, fees
+doctor: ## Check a deployment: wiring, separators, treasury, fees, unpaid balances
 	@$(READ) --sig 'doctor()' -vv
 
 read-config: ## Print every live protocol parameter
@@ -77,6 +77,10 @@ read-provider: ## make read-provider ID=1
 read-job: ## make read-job JOB=0x…
 	@$(call need,JOB)
 	@$(READ) --sig 'job(bytes32)' "$(JOB)" -vv
+
+read-relayer: ## make read-relayer RELAYER=0x…  (the coordinator's relayer: its unpaid gas and deposit fees)
+	@$(call need,RELAYER)
+	@$(READ) --sig 'relayer(address)' "$(RELAYER)" -vv
 
 read-asks: ## make read-asks ID=1 MODEL=1 SLA=3600
 	@$(call need,ID)
@@ -145,10 +149,11 @@ revokeAllowlistEntry: ## make revokeAllowlistEntry MEASUREMENT=<64 lowercase hex
 	@$(call no0x,MEASUREMENT)
 	@$(OPS) --sig 'setAllowlistEntry(bytes32,uint8)' "0x$(MEASUREMENT)" 2 $(_B) -vv
 
-setFees: ## make setFees FEEBPS=250 GASFEE=0
+setFees: ## make setFees FEEBPS=100 GASFEE=3000 DEPOSITFEE=2000  (atomic USDC units)
 	@$(call need,FEEBPS)
 	@$(call need,GASFEE)
-	@$(OPS) --sig 'setFees(uint16,uint128)' "$(FEEBPS)" "$(GASFEE)" $(_B) -vv
+	@$(call need,DEPOSITFEE)
+	@$(OPS) --sig 'setFees(uint16,uint64,uint64)' "$(FEEBPS)" "$(GASFEE)" "$(DEPOSITFEE)" $(_B) -vv
 
 setSlaAllowed: ## make setSlaAllowed SLA=3600 OK=true
 	@$(call need,SLA)

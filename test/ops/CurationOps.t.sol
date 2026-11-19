@@ -418,7 +418,7 @@ contract CurationOpsTest is OpsFixture {
 
     /// @dev `ProviderRegistry.setAllowedModels` writes `allowed[id][epoch][modelIds[i]] = true`
     /// without consulting `modelExists`, so an unregistered id lands silently and the operator
-    /// believes a model is allowed that `post` will reject as ModelDisabled. The guard is real
+    /// believes a model is allowed that `claim` will reject as UnknownModel. The guard is real
     /// added safety, not a mirror of a chain check.
     function test_setAllowedModelsRefusesAModelOutsideTheCatalog() public {
         uint32 id = _register();
@@ -564,14 +564,15 @@ contract CurationOpsTest is OpsFixture {
     // --- JobRegistry parameters -------------------------------------------------------------
 
     function test_setFeesApplies() public {
-        ops.setFees(250, 7);
+        ops.setFees(250, 7, 9);
         assertEq(jr.feeBps(), 250);
         assertEq(jr.gasFee(), 7);
+        assertEq(jr.depositFee(), 9);
     }
 
     function test_setFeesRefusesAboveTheCeilingBeforeSending() public {
         vm.expectRevert(bytes(unicode"setFees: feeBps above the 10% ceiling — JobRegistry reverts FeeTooHigh"));
-        ops.setFees(1001, 0);
+        ops.setFees(1001, 0, 0);
         assertEq(jr.feeBps(), 100, "nothing may have been sent");
     }
 
@@ -581,15 +582,15 @@ contract CurationOpsTest is OpsFixture {
     function test_theRefusedFeeCeilingIsExactlyWhatTheChainRejects() public {
         vm.expectRevert(JobRegistry.FeeTooHigh.selector);
         vm.prank(curation);
-        jr.setFees(1001, 0);
+        jr.setFees(1001, 0, 0);
         vm.prank(curation);
-        jr.setFees(1000, 0);
+        jr.setFees(1000, 0, 0);
         assertEq(jr.feeBps(), 1000, "the chain accepts 1000 itself");
 
         vm.expectRevert(bytes(unicode"setFees: feeBps above the 10% ceiling — JobRegistry reverts FeeTooHigh"));
-        ops.setFees(1001, 0);
+        ops.setFees(1001, 0, 0);
         // and the edge itself is accepted - the guard is not off by one
-        ops.setFees(1000, 3);
+        ops.setFees(1000, 3, 4);
         assertEq(jr.feeBps(), 1000);
         assertEq(jr.gasFee(), 3);
     }
@@ -598,26 +599,34 @@ contract CurationOpsTest is OpsFixture {
     /// `test_setListedIsANoOpWhenAlreadySatisfied`. `setFees` emits `FeesChanged` unconditionally
     /// when it executes and every preflight read is `view`.
     function test_setFeesIsANoOpWhenAlreadySatisfied() public {
-        ops.setFees(250, 7);
+        ops.setFees(250, 7, 9);
         vm.recordLogs();
-        ops.setFees(250, 7);
+        ops.setFees(250, 7, 9);
         assertEq(vm.getRecordedLogs().length, 0, "a no-op must not send a transaction");
         assertEq(jr.feeBps(), 250);
         assertEq(jr.gasFee(), 7);
     }
 
-    /// @dev both halves are compared, so moving either one alone must still send
+    /// @dev all three are compared, so moving any one alone must still send
     function test_setFeesSendsWhenOnlyTheGasFeeMoves() public {
-        ops.setFees(250, 7);
-        ops.setFees(250, 8);
+        ops.setFees(250, 7, 9);
+        ops.setFees(250, 8, 9);
         assertEq(jr.gasFee(), 8);
+    }
+
+    function test_setFeesSendsWhenOnlyTheDepositFeeMoves() public {
+        ops.setFees(250, 7, 9);
+        ops.setFees(250, 7, 10);
+        assertEq(jr.depositFee(), 10);
     }
 
     /// @dev the chain accepts a zero treasury and would transfer every fee to it. This refuses
     /// locally, which is real added safety rather than a mirror of a chain check.
     function test_setTreasuryRefusesZero() public {
         vm.expectRevert(
-            bytes(unicode"setTreasury: the zero address would burn every fee — the chain does not check this")
+            bytes(
+                unicode"setTreasury: the zero address would burn every protocol fee — the chain does not check this"
+            )
         );
         ops.setTreasury(address(0));
         assertEq(jr.treasury(), treasury, "nothing may have been sent");

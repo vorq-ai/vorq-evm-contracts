@@ -5,7 +5,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {JobRegistry} from "../../src/JobRegistry.sol";
 import {Usage} from "../../src/Types.sol";
 
-// Every JobRegistry job-op signature, in one place (Tasks 5-8 share it). Each helper reads the
+// Every JobRegistry op signature, in one place. Each helper reads the
 // typehash and the domain separator off the contract instance, so it follows a subclass's domain
 // — and so it makes external staticcalls: R1 applies to every call site, never put one of these
 // on the line after `vm.expectRevert`.
@@ -63,5 +63,13 @@ library OpSig {
         returns (bytes memory)
     {
         return _sign(vm, pk, jr, keccak256(abi.encode(jr.CANCEL_TYPEHASH(), jobId, issuedAt)));
+    }
+
+    function signWithdraw(Vm vm, uint256 pk, JobRegistry jr, uint128 amount, uint64 issuedAt)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _sign(vm, pk, jr, keccak256(abi.encode(jr.WITHDRAW_TYPEHASH(), amount, issuedAt)));
     }
 }

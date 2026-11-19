@@ -76,5 +76,5 @@ make read-provider ID=1 RPC=$RPC
 ## Next
 
 - [Read contract state with cast](./guides/read-state-with-cast.md): jobs, logs and revert reasons.
-- [Run the local fork](./guides/run-local-fork.md) to post, claim and settle a job end to end.
+- [Run the local fork](./guides/run-local-fork.md) to deposit, claim and settle a job end to end.
 - [Job lifecycle](./concepts/job-lifecycle.md) for what the values you just read mean.

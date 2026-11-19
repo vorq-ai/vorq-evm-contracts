@@ -206,8 +206,8 @@ contract Curation is OpsBase {
             return;
         }
         if (!enabled) {
-            console2.log("  effect: every new post naming this model fails ModelDisabled at once.");
-            console2.log("          Jobs already posted or claimed are UNAFFECTED and still settle.");
+            console2.log("  effect: every claim naming this model fails ModelDisabled at once.");
+            console2.log("          Jobs already claimed are UNAFFECTED and still settle.");
         }
         _exec(address(reg), abi.encodeCall(ProviderRegistry.setModelEnabled, (modelId, enabled)), "setModelEnabled");
     }
@@ -220,7 +220,7 @@ contract Curation is OpsBase {
      *
      * First, the catalog check. `ProviderRegistry.setAllowedModels` writes
      * `allowed[id][epoch][modelIds[i]] = true` without ever consulting `modelExists`, so an id
-     * that is not in the catalog lands silently and reads back as allowed while `post` rejects it
+     * that is not in the catalog lands silently and reads back as allowed while `claim` rejects it
      * as ModelDisabled. The guard below is real added safety, not a mirror of a chain check.
      *
      * Second, the before-set. It is rendered from `_allowAllModels`, never from a
@@ -346,34 +346,40 @@ contract Curation is OpsBase {
         );
     }
 
-    /// @notice The protocol fee and the flat gas fee.
+    /// @notice The protocol fee, the flat per-job gas fee and the flat deposit fee.
     /// @dev The 1000 ceiling is `JobRegistry.setFees`'s own `FeeTooHigh` bound, mirrored here so a
     /// typo fails before anything is signed rather than as a bare custom error on the Safe path.
-    function setFees(uint16 feeBps_, uint128 gasFee_) external {
+    function setFees(uint16 feeBps_, uint64 gasFee_, uint64 depositFee_) external {
         _load();
         require(feeBps_ <= 1000, unicode"setFees: feeBps above the 10% ceiling — JobRegistry reverts FeeTooHigh");
         uint16 curFee = jr.feeBps();
-        uint128 curGas = jr.gasFee();
+        uint64 curGas = jr.gasFee();
+        uint64 curDeposit = jr.depositFee();
         console2.log(
             "  feeBps       ", string.concat(vm.toString(uint256(curFee)), " -> ", vm.toString(uint256(feeBps_)))
         );
         console2.log(
             "  gasFee       ", string.concat(vm.toString(uint256(curGas)), " -> ", vm.toString(uint256(gasFee_)))
         );
-        if (curFee == feeBps_ && curGas == gasFee_) {
+        console2.log(
+            "  depositFee   ",
+            string.concat(vm.toString(uint256(curDeposit)), " -> ", vm.toString(uint256(depositFee_)))
+        );
+        if (curFee == feeBps_ && curGas == gasFee_ && curDeposit == depositFee_) {
             console2.log("  no-op: already set");
             return;
         }
-        console2.log("  note: both price at SETTLEMENT, not at post. Jobs already posted settle at the");
-        console2.log("        NEW feeBps, so this moves money for work already in flight.");
-        console2.log("  note: gasFee is snapshotted per job at post (gasFeeSnap), so a change here");
-        console2.log("        reaches new posts only.");
-        _exec(address(jr), abi.encodeCall(JobRegistry.setFees, (feeBps_, gasFee_)), "setFees");
+        console2.log("  note: feeBps is read at every exit, so a job claimed under one feeBps and");
+        console2.log("        settled under another releases the wrong lock. Change it with the book");
+        console2.log("        empty: no claimed job on this registry.");
+        console2.log("  note: gasFee is fixed per job at claim, so a change reaches new claims only.");
+        console2.log("  note: depositFee is taken from each deposit as it lands.");
+        _exec(address(jr), abi.encodeCall(JobRegistry.setFees, (feeBps_, gasFee_, depositFee_)), "setFees");
     }
 
     /// @notice Add or remove an SLA value from the allowed set.
     /// @dev `setSlaAllowed` validates `secs` not at all, so any value lands. The allowed set is
-    /// what `post` gates on; nothing else reads it.
+    /// what `claim` gates on; nothing else reads it.
     function setSlaAllowed(uint32 secs, bool ok) external {
         _load();
         bool current = jr.allowedSla(secs);
@@ -384,20 +390,20 @@ contract Curation is OpsBase {
             return;
         }
         if (!ok) {
-            console2.log("  effect: new posts naming this SLA fail SlaNotAllowed. Jobs already posted");
+            console2.log("  effect: new claims naming this SLA fail SlaNotAllowed. Jobs already claimed");
             console2.log("          keep their SLA and settle normally.");
         }
         _exec(address(jr), abi.encodeCall(JobRegistry.setSlaAllowed, (secs, ok)), "setSlaAllowed");
     }
 
-    /// @notice Move the fee sink.
+    /// @notice Move the protocol fee sink.
     /// @dev The zero check is this script's alone: `JobRegistry.setTreasury` writes whatever it is
-    /// handed, so address(0) is stored happily and every subsequent fee is transferred to it.
+    /// handed, so address(0) is stored happily and every subsequent protocol fee is transferred to it.
     function setTreasury(address treasury_) external {
         _load();
         require(
             treasury_ != address(0),
-            unicode"setTreasury: the zero address would burn every fee — the chain does not check this"
+            unicode"setTreasury: the zero address would burn every protocol fee — the chain does not check this"
         );
         address current = jr.treasury();
         console2.log("  treasury     ", string.concat(vm.toString(current), " -> ", vm.toString(treasury_)));
@@ -406,7 +412,8 @@ contract Curation is OpsBase {
             return;
         }
         console2.log("  note: the treasury holds no privilege - JobRegistry transfers to it and never");
-        console2.log("        calls it. Fees already paid stay at the old address.");
+        console2.log("        calls it. Fees already paid stay at the old address; fees accrued and");
+        console2.log("        not yet paid out go to the new one at the next payTreasury.");
         _exec(address(jr), abi.encodeCall(JobRegistry.setTreasury, (treasury_)), "setTreasury");
     }
 
@@ -424,7 +431,7 @@ contract Curation is OpsBase {
      * `registry.idOf(signer)` resolves the claimant on that path — but `idOf` is an ungated public
      * mapping and answers just the same after revocation, so the full refund still lands.
      *
-     * Only claimed jobs are at risk. `cancel` ends an Open row that never funded escrow and reaches
+     * Only claimed jobs are at risk. `cancel` ends an unclaimed order that locked nothing and reaches
      * the registry on no line at all, so the count that belongs in the warning is `activeJobs`.
      *
      * THE COUNT IS READ FROM `a`, NEVER FROM THE ADDRESS BOOK'S `jr`. `a` is an arbitrary address

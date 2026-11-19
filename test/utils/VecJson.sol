@@ -108,10 +108,18 @@ library VecJson {
         );
     }
 
-    /// @dev EIP-3009, the payment token's own type — not one of ours. The domain is the TOKEN's
-    /// (its name, its version, its address), which is why this case reads every one of those off
-    /// the deployed token instead of transcribing them. `nonce` is a bytes32 and carries the jobId,
-    /// so the authorization is single-use per job on the token itself.
+    /// @dev The owner's withdrawal from its prepaid balance. No `owner` member: the owner is the
+    /// recovered signer, and the domain binds the chain and the contract.
+    function T_WITHDRAW() internal pure returns (string memory) {
+        return string.concat(
+            "{", D_FULL, ',"Withdraw":[{"name":"amount","type":"uint128"},{"name":"issuedAt","type":"uint64"}]}'
+        );
+    }
+
+    /// @dev EIP-3009, the payment token's own type — not one of ours: the deposit authorization.
+    /// The domain is the TOKEN's (its name, its version, its address), which is why this case reads
+    /// every one of those off the deployed token instead of transcribing them. `nonce` is any
+    /// fresh bytes32, single-use per owner on the token itself.
     function T_RECEIVE_AUTH() internal pure returns (string memory) {
         return string.concat(
             "{",
@@ -289,10 +297,9 @@ library VecJson {
         return string.concat('{"n":', n(count), ',"issuedAt":', n(issuedAt), "}");
     }
 
-    /// @dev `validAfter` is 0 and `validBefore` is `expiresAt + 1`, because the token requires
-    /// `block.timestamp < validBefore` and a claim landing exactly on the expiry second must still
-    /// fund. `nonce` is the jobId — a bytes32, rendered as hex, and single-use on the token.
-    function authMessage(address from, address to, uint256 value, uint64 expiresAt, bytes32 jobId)
+    /// @dev `validAfter` is 0, exactly as `JobRegistry.deposit` spends it. `nonce` is a bytes32,
+    /// rendered as hex.
+    function authMessage(address from, address to, uint256 value, uint256 validBefore, bytes32 nonce)
         internal
         pure
         returns (string memory)
@@ -305,11 +312,15 @@ library VecJson {
             ',"value":',
             s(value),
             ',"validAfter":"0","validBefore":',
-            s(uint256(expiresAt) + 1),
+            s(validBefore),
             ',"nonce":',
-            h(jobId),
+            h(nonce),
             "}"
         );
+    }
+
+    function withdrawMessage(uint128 amount, uint64 issuedAt) internal pure returns (string memory) {
+        return string.concat('{"amount":', s(amount), ',"issuedAt":', n(issuedAt), "}");
     }
 
     function askMessage(uint32 providerId, uint64 signedAt, bool empty) internal pure returns (string memory) {

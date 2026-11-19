@@ -46,6 +46,7 @@ contract Eip712Test is Test {
         "Settle(bytes32 jobId,uint32 promptTok,uint32 cachedTok,uint32 completionTok,uint128 rateInCached,uint64 issuedAt)";
     string internal constant FAIL = "Fail(bytes32 jobId,uint64 issuedAt)";
     string internal constant CANCEL = "Cancel(bytes32 jobId,uint64 issuedAt)";
+    string internal constant WITHDRAW = "Withdraw(uint128 amount,uint64 issuedAt)";
     string internal constant REQUEST_CAPACITY = "RequestCapacity(uint32 n,uint64 issuedAt)";
     string internal constant SET_IDENTITY = "SetIdentity(bytes32 boxKey,bytes evidence,uint64 issuedAt)";
     string internal constant ASK = "Ask(uint32 modelId,uint32 sla,uint128 rateIn,uint128 rateOut)";
@@ -63,6 +64,7 @@ contract Eip712Test is Test {
         _assertCanonical(SETTLE, jr.SETTLE_TYPEHASH(), "Settle");
         _assertCanonical(FAIL, jr.FAIL_TYPEHASH(), "Fail");
         _assertCanonical(CANCEL, jr.CANCEL_TYPEHASH(), "Cancel");
+        _assertCanonical(WITHDRAW, jr.WITHDRAW_TYPEHASH(), "Withdraw");
     }
 
     function test_ProviderRegistryTypehashesAreCanonical() public view {

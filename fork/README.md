@@ -15,7 +15,7 @@ Runs [Anvil](https://getfoundry.sh/anvil/overview) forked from Base Sepolia near
 ```bash
 export BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 make up      # start and deploy; writes state/addresses.json and state/abi/
-make smoke   # post -> claim -> submitAndSettle
+make smoke   # deposit -> claim -> submitAndSettle
 make down    # discard the chain
 ```
 

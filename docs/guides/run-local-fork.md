@@ -17,7 +17,7 @@ description: Start a disposable Base Sepolia fork with the VORQ contracts deploy
 cd fork
 export BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 make up      # start Anvil, deploy, publish state/addresses.json and state/abi/
-make smoke   # post -> claim -> submitAndSettle through :8545
+make smoke   # deposit -> claim -> submitAndSettle through :8545
 make down    # discard the chain
 ```
 

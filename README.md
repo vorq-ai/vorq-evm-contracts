@@ -2,13 +2,13 @@
 
 Solidity contracts for the VORQ compute marketplace on Base.
 
-A client posts a signed order, a registered provider claims it against USDC escrow, and settlement pays out against metered usage. Every client and provider action is authorised by an EIP-712 signature, so any key can relay the transaction. Escrow is pulled with EIP-3009 `receiveWithAuthorization`.
+A client prepays a USDC balance and signs an order; a registered provider's claim carries the order on chain and locks its cost from that balance, and settlement credits the provider, the treasury's protocol fee, the relayer's gas fee and the client's refund against metered usage. Earnings are paid out to the provider's operator key, the relayer and the treasury by permissionless payout calls. Every client and provider action is authorised by a signature, so any key can relay the transaction and anyone can run a coordinator: the relayer that lands a claim earns that job's gas fee, and the relayer that lands a deposit earns its deposit fee. Deposits are pulled with EIP-3009 `receiveWithAuthorization`.
 
 ## Contracts
 
 | Contract | Purpose |
 | --- | --- |
-| [`JobRegistry`](src/JobRegistry.sol) | Job lifecycle and escrow: post, claim, settle, fail, reclaim, cancel |
+| [`JobRegistry`](src/JobRegistry.sol) | Job lifecycle and the prepaid ledger: claim, settle, fail, reclaim, cancel; deposit, withdraw, payouts |
 | [`ProviderRegistry`](src/ProviderRegistry.sol) | Providers, model catalog, reputation, capacity, curation allowlist |
 | [`AskRegistry`](src/AskRegistry.sol) | Signed provider price quotes |
 | [`Types.sol`](src/Types.sol) | Shared structs and status codes |

@@ -78,7 +78,7 @@ cd /contracts
 
 # A fork's clock is the PINNED BLOCK's, not this machine's, so the chain boots however old that
 # block is and stays there — and both the +/-600 s window on a signed op's issuedAt and an order's
-# expiresAt are compared against block.timestamp, so every op and every post would be refused.
+# expiresAt are compared against block.timestamp, so every op and every claim would be refused.
 cast rpc anvil_setTime "$(date +%s)" --rpc-url "$RPC" >/dev/null
 cast rpc anvil_mine 0x1 --rpc-url "$RPC" >/dev/null
 

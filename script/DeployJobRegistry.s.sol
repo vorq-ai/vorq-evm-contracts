@@ -9,6 +9,8 @@ import {ProviderRegistry} from "../src/ProviderRegistry.sol";
 /// JobRegistry change, since the registries are immutable. The ProviderRegistry, the AskRegistry,
 /// the catalog and the providers stay. Curation then authorises the new address with
 /// `setJobRegistry(new, true)`, and de-authorises the old one once the coordinator reads the new.
+/// The constructor seeds the fees: feeBps 100 (1%), gasFee 3_000 ($0.003) and depositFee 2_000
+/// ($0.002); curation moves them with `setFees` from the measured gas.
 /// Writes `out-addresses/job-registry.json`: the address, its domain separator and deploy block.
 contract DeployJobRegistry is Script {
     string internal constant OUT_PATH = "./out-addresses/job-registry.json";
